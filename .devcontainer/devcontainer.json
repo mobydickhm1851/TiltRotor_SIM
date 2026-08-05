@@ -1,0 +1,26 @@
+{
+  "name": "RotorPy Tiltrotor",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "postCreateCommand": "python -m pip install --upgrade pip && python -m pip install -e '.[dev]'",
+  "forwardPorts": [8050],
+  "portsAttributes": {
+    "8050": {
+      "label": "Tiltrotor dashboard",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "containerEnv": {
+    "DASHBOARD_HOST": "0.0.0.0",
+    "DASHBOARD_PORT": "8050",
+    "DASHBOARD_NO_BROWSER": "1",
+    "BOKEH_ALLOW_WS_ORIGIN": "*"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  }
+}
