@@ -20,6 +20,12 @@ class SimulationSample:
     diagnostics: dict
 
 
+ROUTE_TRACKING_PHASES = {
+    FlightPhase.TRANSITION_TO_CRUISE,
+    FlightPhase.CRUISE,
+}
+
+
 class TiltrotorSimulation:
     def __init__(
         self,
@@ -49,6 +55,7 @@ class TiltrotorSimulation:
             self.vehicle.initial_state if state is None else state
         )
         self.control = self.controller.zero_control()
+        self._annotate_control_context()
         self.previous_accel = np.zeros(3)
         self.last_sample = self._make_sample()
 
@@ -57,6 +64,19 @@ class TiltrotorSimulation:
             wind_world,
             dtype=float,
         ).copy()
+
+    def _annotate_control_context(self) -> None:
+        """Attach command geometry needed by logging and the dashboard.
+
+        ``hold_x_m``/``hold_y_m`` are a fixed point in vertical and landing
+        modes, but they are a route-centreline anchor in transition-to-cruise
+        and cruise. Keeping this context separate prevents the fixed route
+        anchor from being misreported as a non-moving instantaneous x/y target.
+        """
+        sp = self.commander.setpoint
+        self.control["route_anchor_x"] = np.array(float(sp.hold_x_m))
+        self.control["route_anchor_y"] = np.array(float(sp.hold_y_m))
+        self.control["route_heading"] = np.array(float(sp.heading_rad))
 
     def _make_sample(self) -> SimulationSample:
         return SimulationSample(
@@ -77,6 +97,7 @@ class TiltrotorSimulation:
             self.state,
             None,
         )
+        self._annotate_control_context()
         self.state = self.vehicle.step(
             self.state,
             self.control,
@@ -126,6 +147,7 @@ class TiltrotorSimulation:
                     self.control["phase_code"] = np.array(
                         float(FlightPhase.COMPLETE)
                     )
+                    self._annotate_control_context()
                     records.append(sample_to_record(
                         self._make_sample(),
                         self.vehicle.params,
@@ -158,6 +180,63 @@ class TiltrotorSimulation:
         return pd.DataFrame.from_records(records)
 
 
+def _tracking_reference(sample: SimulationSample) -> dict:
+    """Return the active point/route target used for position-error display.
+
+    Vertical, hover, back-transition and landing phases use a fixed point target.
+    Transition-to-cruise and cruise are *path-following* phases: longitudinal
+    motion is controlled by airspeed, while lateral position is controlled with
+    cross-track error. Their meaningful instantaneous x/y target is therefore
+    the closest point on the commanded route centreline, not the fixed route
+    anchor. This makes x/y errors represent the actual route-normal correction
+    instead of accumulating travelled distance as a false position error.
+    """
+    state = sample.state
+    control = sample.control
+    phase_value = int(round(float(control.get("phase_code", 0.0))))
+    try:
+        phase = FlightPhase(phase_value)
+    except ValueError:
+        phase = FlightPhase.GROUND
+
+    actual_xy = np.asarray(state["x"][:2], dtype=float)
+    anchor_xy = np.array([
+        float(control.get("route_anchor_x", control.get("target_x", 0.0))),
+        float(control.get("route_anchor_y", control.get("target_y", 0.0))),
+    ])
+    heading = float(control.get("route_heading", 0.0))
+    forward = np.array([np.cos(heading), np.sin(heading)])
+    lateral = np.array([-np.sin(heading), np.cos(heading)])
+
+    from_anchor = actual_xy - anchor_xy
+    along_track_distance = float(np.dot(from_anchor, forward))
+
+    if phase in ROUTE_TRACKING_PHASES:
+        target_xy = anchor_xy + along_track_distance * forward
+        reference_type = 1.0
+        along_track_error = 0.0
+    else:
+        target_xy = anchor_xy
+        reference_type = 0.0
+        along_track_error = float(np.dot(target_xy - actual_xy, forward))
+
+    position_error = target_xy - actual_xy
+    cross_track_error = float(np.dot(position_error, lateral))
+
+    return {
+        "target_x_m": float(target_xy[0]),
+        "target_y_m": float(target_xy[1]),
+        "route_anchor_x_m": float(anchor_xy[0]),
+        "route_anchor_y_m": float(anchor_xy[1]),
+        "x_error_m": float(position_error[0]),
+        "y_error_m": float(position_error[1]),
+        "cross_track_error_m": cross_track_error,
+        "along_track_error_m": along_track_error,
+        "along_track_distance_m": along_track_distance,
+        "position_reference_type": reference_type,
+    }
+
+
 def sample_to_record(sample: SimulationSample, params: dict) -> dict:
     s, c, d = sample.state, sample.control, sample.diagnostics
     roll, pitch, yaw = euler_deg(s["q"])
@@ -170,6 +249,7 @@ def sample_to_record(sample: SimulationSample, params: dict) -> dict:
     accel = np.asarray(d.get("accel_world", np.zeros(3)))
     jerk = np.asarray(d.get("jerk_world", np.zeros(3)))
     coeff = d.get("coefficients", {})
+    tracking = _tracking_reference(sample)
     rec = {
         "time_s": sample.t,
         "phase": int(round(float(c.get("phase_code", 0.0)))),
@@ -215,16 +295,7 @@ def sample_to_record(sample: SimulationSample, params: dict) -> dict:
         "target_airspeed_mps": float(
             c.get("target_airspeed", 0.0)
         ),
-        "target_x_m": float(c.get("target_x", 0.0)),
-        "target_y_m": float(c.get("target_y", 0.0)),
-        "x_error_m": float(c.get("position_error_x", 0.0)),
-        "y_error_m": float(c.get("position_error_y", 0.0)),
-        "cross_track_error_m": float(
-            c.get("cross_track_error", 0.0)
-        ),
-        "along_track_error_m": float(
-            c.get("along_track_error", 0.0)
-        ),
+        **tracking,
     }
     for i, rpm in enumerate(rotor_rpm, start=1):
         rec[f"rotor_{i}_rpm"] = rpm

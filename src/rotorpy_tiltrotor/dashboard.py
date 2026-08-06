@@ -23,8 +23,10 @@ def _empty_source() -> ColumnDataSource:
     fields = [
         "time_s", "phase", "x_m", "y_m", "altitude_m", "airspeed_mps",
         "target_altitude_m", "target_airspeed_mps",
-        "target_x_m", "target_y_m", "x_error_m", "y_error_m",
-        "cross_track_error_m", "along_track_error_m",
+        "target_x_m", "target_y_m", "route_anchor_x_m", "route_anchor_y_m",
+        "x_error_m", "y_error_m", "cross_track_error_m",
+        "along_track_error_m", "along_track_distance_m",
+        "position_reference_type",
         "roll_deg", "pitch_deg", "yaw_deg",
         "p_deg_s", "q_deg_s", "r_deg_s",
         "tilt_deg", "aileron_deg", "elevator_deg", "rudder_deg",
@@ -47,7 +49,6 @@ def build_dashboard(
     sim = TiltrotorSimulation(dt=0.01) if simulation is None else simulation
     source = _empty_source()
     path_source = ColumnDataSource({"x": [], "y": [], "z": []})
-
     runtime = {
         "paused": True,
         "automatic": False,
@@ -123,19 +124,15 @@ def build_dashboard(
     def takeoff() -> None:
         enter_manual_mode()
         sim.commander.vertical_takeoff(
-            sim.t,
-            target_altitude(),
-            sim.state["x"][0],
-            sim.state["x"][1],
+            sim.t, target_altitude(),
+            sim.state["x"][0], sim.state["x"][1],
         )
 
     def transition() -> None:
         enter_manual_mode()
         setpoint = sim.commander.setpoint
         sim.commander.transition_to_cruise(
-            sim.t,
-            target_altitude(),
-            float(speed_input.value or 15.0),
+            sim.t, target_altitude(), float(speed_input.value or 15.0),
             heading_rad=setpoint.heading_rad,
             route_x_m=setpoint.hold_x_m,
             route_y_m=setpoint.hold_y_m,
@@ -145,9 +142,7 @@ def build_dashboard(
         enter_manual_mode()
         setpoint = sim.commander.setpoint
         sim.commander.cruise(
-            sim.t,
-            target_altitude(),
-            float(speed_input.value or 15.0),
+            sim.t, target_altitude(), float(speed_input.value or 15.0),
             heading_rad=setpoint.heading_rad,
             route_x_m=setpoint.hold_x_m,
             route_y_m=setpoint.hold_y_m,
@@ -156,8 +151,7 @@ def build_dashboard(
     def back_transition() -> None:
         enter_manual_mode()
         sim.commander.transition_to_hover(
-            sim.t,
-            target_altitude(),
+            sim.t, target_altitude(),
             sim.state["x"][0] + 25.0,
             sim.commander.setpoint.hold_y_m,
         )
@@ -165,9 +159,7 @@ def build_dashboard(
     def land() -> None:
         enter_manual_mode()
         sim.commander.vertical_land(
-            sim.t,
-            sim.state["x"][0],
-            sim.state["x"][1],
+            sim.t, sim.state["x"][0], sim.state["x"][1],
         )
 
     def automatic_mission() -> None:
@@ -219,9 +211,7 @@ def build_dashboard(
         )
         for spec in series:
             plot.line(
-                "time_s",
-                spec["field"],
-                source=source,
+                "time_s", spec["field"], source=source,
                 legend_label=spec["label"],
                 line_width=spec.get("width", 2.2),
                 line_color=spec["color"],
@@ -239,11 +229,13 @@ def build_dashboard(
         {"field": "airspeed_mps", "label": "Airspeed", "color": COLORS[1]},
         {"field": "target_airspeed_mps", "label": "Airspeed target", "color": COLORS[1], "dash": "dashed"},
     ])
-    p_position = time_plot("Position tracking", "m", [
-        {"field": "x_error_m", "label": "x error", "color": COLORS[0]},
-        {"field": "y_error_m", "label": "y error", "color": COLORS[1]},
-        {"field": "cross_track_error_m", "label": "Cross-track error", "color": COLORS[3], "dash": "dashed"},
-    ])
+    p_position = time_plot(
+        "Position tracking (point hold / route projection)", "m", [
+            {"field": "x_error_m", "label": "x tracking error", "color": COLORS[0]},
+            {"field": "y_error_m", "label": "y tracking error", "color": COLORS[1]},
+            {"field": "cross_track_error_m", "label": "Cross-track error", "color": COLORS[3], "dash": "dashed"},
+        ],
+    )
     p_attitude = time_plot("Attitude", "deg", [
         {"field": "roll_deg", "label": "Roll", "color": COLORS[0]},
         {"field": "pitch_deg", "label": "Pitch", "color": COLORS[1]},
@@ -286,11 +278,8 @@ def build_dashboard(
 
     p_top = figure(
         title="Top view",
-        x_axis_label="x [m]",
-        y_axis_label="y [m]",
-        height=320,
-        sizing_mode="stretch_width",
-        match_aspect=True,
+        x_axis_label="x [m]", y_axis_label="y [m]",
+        height=320, sizing_mode="stretch_width", match_aspect=True,
     )
     p_top.line(
         "x", "y", source=path_source,
@@ -301,11 +290,21 @@ def build_dashboard(
         "x", "y", source=path_source,
         size=4, fill_color=COLORS[1], line_color=None,
     )
+    p_top.line(
+        "target_x_m", "target_y_m", source=source,
+        line_width=1.8, line_color=COLORS[3], line_dash="dashed",
+        legend_label="Active point / route-projection target",
+    )
     p_top.scatter(
         "target_x_m", "target_y_m", source=source,
-        size=8, marker="diamond",
+        size=6, marker="diamond",
         fill_color=COLORS[3], line_color=COLORS[3],
-        legend_label="Hold / route anchor",
+    )
+    p_top.scatter(
+        "route_anchor_x_m", "route_anchor_y_m", source=source,
+        size=9, marker="cross",
+        line_color=COLORS[2],
+        legend_label="Fixed route anchor / hold point",
     )
     p_top.legend.click_policy = "mute"
 
@@ -313,8 +312,7 @@ def build_dashboard(
         title="Side view",
         x_axis_label="Along-track x [m]",
         y_axis_label="Altitude [m]",
-        height=320,
-        sizing_mode="stretch_width",
+        height=320, sizing_mode="stretch_width",
     )
     p_side.line(
         "x", "z", source=path_source,
@@ -335,16 +333,12 @@ def build_dashboard(
                 and abs(float(sim.state["v"][2])) < 0.20
             )
             runtime["manual_settle_s"] = (
-                runtime["manual_settle_s"] + dt
-                if settled
-                else 0.0
+                runtime["manual_settle_s"] + dt if settled else 0.0
             )
             if runtime["manual_settle_s"] >= 0.75:
                 sim.commander.hover(
-                    sim.t,
-                    setpoint.altitude_m,
-                    setpoint.hold_x_m,
-                    setpoint.hold_y_m,
+                    sim.t, setpoint.altitude_m,
+                    setpoint.hold_x_m, setpoint.hold_y_m,
                 )
                 runtime["manual_settle_s"] = 0.0
 
@@ -388,6 +382,11 @@ def build_dashboard(
         )
         phase = PHASE_NAMES.get(record["phase"], str(record["phase"]))
         mode = "automatic mission" if runtime["automatic"] else "manual commands"
+        reference_name = (
+            "route projection"
+            if record["position_reference_type"] > 0.5
+            else "fixed point"
+        )
         status.text = (
             f"<b>Mode:</b> {mode} &nbsp; "
             f"<b>Phase:</b> {phase} &nbsp; "
@@ -395,7 +394,8 @@ def build_dashboard(
             f"<b>Altitude:</b> {record['altitude_m']:.2f}/{record['target_altitude_m']:.1f} m &nbsp; "
             f"<b>Airspeed:</b> {record['airspeed_mps']:.2f}/{record['target_airspeed_mps']:.1f} m/s &nbsp; "
             f"<b>x/y:</b> {record['x_m']:.2f}/{record['y_m']:.2f} m &nbsp; "
-            f"<b>target x/y:</b> {record['target_x_m']:.2f}/{record['target_y_m']:.2f} m &nbsp; "
+            f"<b>{reference_name} x/y:</b> {record['target_x_m']:.2f}/{record['target_y_m']:.2f} m &nbsp; "
+            f"<b>Along route:</b> {record['along_track_distance_m']:.1f} m &nbsp; "
             f"<b>XTE:</b> {record['cross_track_error_m']:.2f} m &nbsp; "
             f"<b>Pitch:</b> {record['pitch_deg']:.2f}° &nbsp; "
             f"<b>Tilt:</b> {record['tilt_deg']:.1f}° &nbsp; "
@@ -421,10 +421,7 @@ def build_dashboard(
     ], sizing_mode="stretch_width")
     doc.add_root(column(
         Div(text="<h2>RotorPy Tiltrotor Live Monitor</h2>"),
-        controls,
-        environment_controls,
-        status,
-        plots,
+        controls, environment_controls, status, plots,
         sizing_mode="stretch_width",
     ))
     doc.title = "RotorPy Tiltrotor"
