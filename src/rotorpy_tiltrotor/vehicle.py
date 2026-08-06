@@ -34,6 +34,7 @@ class Tiltrotor(RotorPyMultirotor):
             "alpha": 0.0,
             "beta": 0.0,
             "qbar": 0.0,
+            "wing_blend": 0.0,
             "aero_force_body": np.zeros(3),
             "aero_moment_body": np.zeros(3),
             "rotor_force_body": np.zeros(3),
@@ -41,7 +42,14 @@ class Tiltrotor(RotorPyMultirotor):
             "total_force_body": np.zeros(3),
             "total_moment_body": np.zeros(3),
             "power_w": 0.0,
-            "coefficients": {"CL":0.0,"CD":0.0,"CY":0.0,"Cl":0.0,"Cm":0.0,"Cn":0.0},
+            "coefficients": {
+                "CL": 0.0,
+                "CD": 0.0,
+                "CY": 0.0,
+                "Cl": 0.0,
+                "Cm": 0.0,
+                "Cn": 0.0,
+            },
         }
 
     @staticmethod
@@ -73,31 +81,72 @@ class Tiltrotor(RotorPyMultirotor):
 
     def aero_wrench_from_state(self, state: dict) -> AeroResult:
         R = rotation_matrix(state["q"])
-        body_airspeed = R.T @ (state["v"] - state.get("wind", np.zeros(3)))
-        return aerodynamic_wrench(body_airspeed, state["w"], state["surfaces"], self.params)
+        body_airspeed = R.T @ (
+            state["v"] - state.get("wind", np.zeros(3))
+        )
+        return aerodynamic_wrench(
+            body_airspeed,
+            state["w"],
+            state["surfaces"],
+            self.params,
+            tilt_angle=float(state["tilt_angle"]),
+        )
 
     def rotor_wrench(self, rotor_speeds: np.ndarray, tilt_angle: float):
         p = self.params
         axis = rotor_axis(tilt_angle)
         thrusts = p["k_eta"] * np.asarray(rotor_speeds, dtype=float) ** 2
         forces = thrusts[:, None] * axis[None, :]
-        reaction = p["rotor_directions"][:, None] * p["k_m"] * np.asarray(rotor_speeds)[:, None] ** 2 * axis[None, :]
+        reaction = (
+            p["rotor_directions"][:, None]
+            * p["k_m"]
+            * np.asarray(rotor_speeds)[:, None] ** 2
+            * axis[None, :]
+        )
         moments = np.cross(p["rotor_pos"], forces) + reaction
         return np.sum(forces, axis=0), np.sum(moments, axis=0)
 
     def compute_wrench(self, state: dict):
         aero = self.aero_wrench_from_state(state)
-        rotor_force, rotor_moment = self.rotor_wrench(state["rotor_speeds"], float(state["tilt_angle"]))
-        return aero.force_body + rotor_force, aero.moment_body + rotor_moment, aero, rotor_force, rotor_moment
+        rotor_force, rotor_moment = self.rotor_wrench(
+            state["rotor_speeds"], float(state["tilt_angle"])
+        )
+        return (
+            aero.force_body + rotor_force,
+            aero.moment_body + rotor_moment,
+            aero,
+            rotor_force,
+            rotor_moment,
+        )
 
     def _control_arrays(self, control: dict):
-        cmd_speed = np.asarray(control.get("cmd_motor_speeds", np.zeros(self.num_rotors)), dtype=float)
+        cmd_speed = np.asarray(
+            control.get("cmd_motor_speeds", np.zeros(self.num_rotors)),
+            dtype=float,
+        )
         if cmd_speed.shape != (self.num_rotors,):
-            raise ValueError(f"cmd_motor_speeds must have shape ({self.num_rotors},)")
-        cmd_speed = np.clip(cmd_speed, self.params["rotor_speed_min"], self.params["rotor_speed_max"])
-        cmd_tilt = float(np.clip(control.get("cmd_tilt_angle", 0.0), self.params["tilt_min"], self.params["tilt_max"]))
-        cmd_surfaces = np.asarray(control.get("cmd_surfaces", np.zeros(3)), dtype=float)
-        cmd_surfaces = np.clip(cmd_surfaces, self.params["surface_min"], self.params["surface_max"])
+            raise ValueError(
+                f"cmd_motor_speeds must have shape ({self.num_rotors},)"
+            )
+        cmd_speed = np.clip(
+            cmd_speed,
+            self.params["rotor_speed_min"],
+            self.params["rotor_speed_max"],
+        )
+        cmd_tilt = float(np.clip(
+            control.get("cmd_tilt_angle", 0.0),
+            self.params["tilt_min"],
+            self.params["tilt_max"],
+        ))
+        cmd_surfaces = np.asarray(
+            control.get("cmd_surfaces", np.zeros(3)),
+            dtype=float,
+        )
+        cmd_surfaces = np.clip(
+            cmd_surfaces,
+            self.params["surface_min"],
+            self.params["surface_max"],
+        )
         return cmd_speed, cmd_tilt, cmd_surfaces
 
     def _s_dot(self, s: np.ndarray, wind: np.ndarray, control: dict):
@@ -105,16 +154,47 @@ class Tiltrotor(RotorPyMultirotor):
         state = self._unpack_state(s, wind)
         cmd_speed, cmd_tilt, cmd_surfaces = self._control_arrays(control)
         R = rotation_matrix(state["q"])
-        rotor_accel = np.clip((cmd_speed - state["rotor_speeds"]) / p["tau_m"], -p["rotor_accel_max"], p["rotor_accel_max"])
-        tilt_rate = np.clip((cmd_tilt - float(state["tilt_angle"])) / p["tau_tilt"], -p["tilt_rate_max"], p["tilt_rate_max"])
-        surface_rate = np.clip((cmd_surfaces - state["surfaces"]) / p["tau_surface"], -p["surface_rate_max"], p["surface_rate_max"])
-        total_force_body, total_moment_body, aero, rotor_force, rotor_moment = self.compute_wrench(state)
-        total_force_world = R @ total_force_body + np.array([0.0, 0.0, -self.mass * self.g])
+
+        rotor_accel = np.clip(
+            (cmd_speed - state["rotor_speeds"]) / p["tau_m"],
+            -p["rotor_accel_max"],
+            p["rotor_accel_max"],
+        )
+        tilt_rate = np.clip(
+            (cmd_tilt - float(state["tilt_angle"])) / p["tau_tilt"],
+            -p["tilt_rate_max"],
+            p["tilt_rate_max"],
+        )
+        surface_rate = np.clip(
+            (cmd_surfaces - state["surfaces"]) / p["tau_surface"],
+            -p["surface_rate_max"],
+            p["surface_rate_max"],
+        )
+
+        (
+            total_force_body,
+            total_moment_body,
+            aero,
+            rotor_force,
+            rotor_moment,
+        ) = self.compute_wrench(state)
+        total_force_world = (
+            R @ total_force_body
+            + np.array([0.0, 0.0, -self.mass * self.g])
+        )
         v_dot = total_force_world / self.mass
         w = state["w"]
-        w_dot = self.inv_inertia @ (total_moment_body - np.cross(w, self.inertia @ w))
-        power_w = p["power_coeff"] * float(np.sum(np.maximum(state["rotor_speeds"], 0.0) ** 3)) + p["avionics_power_w"]
+        w_dot = self.inv_inertia @ (
+            total_moment_body - np.cross(w, self.inertia @ w)
+        )
+
+        power_w = (
+            p["power_coeff"]
+            * float(np.sum(np.maximum(state["rotor_speeds"], 0.0) ** 3))
+            + p["avionics_power_w"]
+        )
         energy_dot = -power_w if float(state["energy_j"]) > 0.0 else 0.0
+
         sdot = np.zeros_like(s)
         n = self.num_rotors
         sdot[0:3] = state["v"]
@@ -125,11 +205,13 @@ class Tiltrotor(RotorPyMultirotor):
         sdot[13+n] = tilt_rate
         sdot[14+n:17+n] = surface_rate
         sdot[17+n] = energy_dot
+
         diagnostics = {
             "airspeed": aero.airspeed,
             "alpha": aero.alpha,
             "beta": aero.beta,
             "qbar": aero.qbar,
+            "wing_blend": aero.wing_blend,
             "aero_force_body": aero.force_body,
             "aero_moment_body": aero.moment_body,
             "rotor_force_body": rotor_force,
@@ -148,23 +230,60 @@ class Tiltrotor(RotorPyMultirotor):
         wind = np.asarray(state.get("wind", np.zeros(3)), dtype=float)
         f = lambda s: self._s_dot(s, wind, control)[0]
         h = float(t_step)
-        k1 = f(s0); k2 = f(s0 + 0.5*h*k1); k3 = f(s0 + 0.5*h*k2); k4 = f(s0 + h*k3)
-        s = s0 + (h/6.0) * (k1 + 2.0*k2 + 2.0*k3 + k4)
+        k1 = f(s0)
+        k2 = f(s0 + 0.5 * h * k1)
+        k3 = f(s0 + 0.5 * h * k2)
+        k4 = f(s0 + h * k3)
+        s = s0 + (h / 6.0) * (k1 + 2.0*k2 + 2.0*k3 + k4)
         new_state = self._unpack_state(s, wind)
         new_state["q"] = normalize_quat(new_state["q"])
-        new_state["rotor_speeds"] = np.clip(new_state["rotor_speeds"], self.params["rotor_speed_min"], self.params["rotor_speed_max"])
-        new_state["tilt_angle"] = np.array(np.clip(new_state["tilt_angle"], self.params["tilt_min"], self.params["tilt_max"]))
-        new_state["surfaces"] = np.clip(new_state["surfaces"], self.params["surface_min"], self.params["surface_max"])
-        new_state["energy_j"] = np.array(max(0.0, float(new_state["energy_j"])))
+        new_state["rotor_speeds"] = np.clip(
+            new_state["rotor_speeds"],
+            self.params["rotor_speed_min"],
+            self.params["rotor_speed_max"],
+        )
+        new_state["tilt_angle"] = np.array(np.clip(
+            new_state["tilt_angle"],
+            self.params["tilt_min"],
+            self.params["tilt_max"],
+        ))
+        new_state["surfaces"] = np.clip(
+            new_state["surfaces"],
+            self.params["surface_min"],
+            self.params["surface_max"],
+        )
+        new_state["energy_j"] = np.array(
+            max(0.0, float(new_state["energy_j"]))
+        )
+
         if self.params.get("ground_enabled", True) and new_state["x"][2] < 0.0:
             new_state["x"][2] = 0.0
             if new_state["v"][2] < 0.0:
                 new_state["v"][2] = 0.0
-            new_state["v"][:2] *= np.exp(-float(self.params.get("ground_friction_rate", 3.0)) * h)
-        _, self.last_diagnostics = self._s_dot(self._pack_state(new_state), wind, control)
+            new_state["v"][:2] *= np.exp(
+                -float(self.params.get("ground_friction_rate", 3.0)) * h
+            )
+
+        _, self.last_diagnostics = self._s_dot(
+            self._pack_state(new_state),
+            wind,
+            control,
+        )
         return new_state
 
-    def statedot(self, state: dict, control: dict, t_step: float | None = None) -> dict:
-        sdot, diagnostics = self._s_dot(self._pack_state(state), state.get("wind", np.zeros(3)), control)
+    def statedot(
+        self,
+        state: dict,
+        control: dict,
+        t_step: float | None = None,
+    ) -> dict:
+        sdot, diagnostics = self._s_dot(
+            self._pack_state(state),
+            state.get("wind", np.zeros(3)),
+            control,
+        )
         self.last_diagnostics = diagnostics
-        return {"vdot": sdot[3:6].copy(), "wdot": sdot[10:13].copy()}
+        return {
+            "vdot": sdot[3:6].copy(),
+            "wdot": sdot[10:13].copy(),
+        }

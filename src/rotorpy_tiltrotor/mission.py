@@ -14,8 +14,15 @@ class MissionTrajectory:
 
     def update(self, t: float) -> dict:
         sp = self.commander.setpoint
-        x = np.array([sp.hold_x_m, sp.hold_y_m, sp.altitude_m], dtype=float)
-        v = sp.airspeed_mps * np.array([np.cos(sp.heading_rad), np.sin(sp.heading_rad), 0.0])
+        x = np.array(
+            [sp.hold_x_m, sp.hold_y_m, sp.altitude_m],
+            dtype=float,
+        )
+        v = sp.airspeed_mps * np.array([
+            np.cos(sp.heading_rad),
+            np.sin(sp.heading_rad),
+            0.0,
+        ])
         return {
             "x": x,
             "x_dot": v,
@@ -27,4 +34,6 @@ class MissionTrajectory:
             "phase_code": np.array(float(sp.phase)),
             "target_altitude": np.array(sp.altitude_m),
             "target_airspeed": np.array(sp.airspeed_mps),
+            "target_x": np.array(sp.hold_x_m),
+            "target_y": np.array(sp.hold_y_m),
         }
