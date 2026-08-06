@@ -12,6 +12,17 @@ RotorPy-compatible reduced-order quad tiltrotor simulation with:
 
 > This is a transparent reduced-order research prototype. It is not a certified or flight-validated aircraft model.
 
+## v0.3 position-hold and guidance corrections
+
+- Vertical climb no longer activates the conventional fixed-wing coefficient model from a spurious `-90°` angle of attack.
+- Fuselage drag remains active in every phase, while wing/tail forces and surface authority are blended using positive forward airspeed and nacelle tilt.
+- The automatic mission preserves the original takeoff x/y point when changing from vertical takeoff to hover.
+- Transition and cruise now use cross-track position feedback instead of lateral-velocity damping alone.
+- Back transition preserves its planned landing point when changing to vertical landing.
+- Dashboard monitoring includes target x/y, x/y error, cross-track error, and wing-aerodynamic blend.
+
+See [`POSITION_HOLD_FIX_REPORT.md`](POSITION_HOLD_FIX_REPORT.md) for the rationale and limitations.
+
 ## Windows: first installation
 
 ```powershell
@@ -85,10 +96,10 @@ Forward port `8050` from the Codespaces Ports panel. The included devcontainer i
 ```text
 src/rotorpy_tiltrotor/
 ├── parameters.py     aircraft and actuator parameters
-├── aerodynamics.py   reduced-order wing/tail wrench
+├── aerodynamics.py   reduced-order blended wing/tail wrench
 ├── allocator.py      rotor thrust/moment allocation
 ├── commands.py       flight phases and mission state machine
-├── controller.py     cascaded PID and authority blending
+├── controller.py     cascaded PID, route guidance and authority blending
 ├── vehicle.py        nonlinear dynamics and actuator states
 ├── simulator.py      batch/real-time simulation and logging
 └── dashboard.py      live Bokeh UI
