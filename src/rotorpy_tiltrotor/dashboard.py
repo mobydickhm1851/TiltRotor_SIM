@@ -17,6 +17,111 @@ from .simulator import TiltrotorSimulation, sample_to_record
 
 PHASE_NAMES = {int(p): p.name for p in FlightPhase}
 COLORS = Category10[10]
+BACK_TRANSITION_DURATION_S = 14.0
+BACK_TRANSITION_COMFORT_DECEL_MPS2 = 1.25
+BACK_TRANSITION_MIN_FORWARD_M = 8.0
+BACK_TRANSITION_BUFFER_M = 5.0
+MANUAL_PHASE_SETTLE_S = 0.75
+
+
+def planned_hover_target(
+    state: dict,
+    setpoint,
+    duration_s: float = BACK_TRANSITION_DURATION_S,
+    comfortable_decel_mps2: float = BACK_TRANSITION_COMFORT_DECEL_MPS2,
+) -> tuple[np.ndarray, float]:
+    """Return a fixed route-centreline point suitable for back transition.
+
+    The old dashboard always chose ``current x + 25 m``. At cruise speed that
+    point was usually too close, and pressing the button again created another
+    target 25 m ahead while also restarting the nacelle-tilt schedule. The new
+    target is created once, remains on the commanded route centreline, and is
+    far enough ahead for the nominal transition schedule and a comfortable
+    kinematic deceleration.
+    """
+    heading = float(setpoint.heading_rad)
+    forward = np.array([np.cos(heading), np.sin(heading)], dtype=float)
+    anchor = np.array(
+        [float(setpoint.hold_x_m), float(setpoint.hold_y_m)],
+        dtype=float,
+    )
+    position = np.asarray(state["x"], dtype=float)[:2]
+    velocity = np.asarray(state["v"], dtype=float)[:2]
+
+    along_distance = float(np.dot(position - anchor, forward))
+    route_projection = anchor + along_distance * forward
+    forward_speed = max(0.0, float(np.dot(velocity, forward)))
+
+    duration_s = max(4.0, float(duration_s))
+    comfortable_decel_mps2 = max(0.25, float(comfortable_decel_mps2))
+    schedule_distance = 0.5 * forward_speed * duration_s
+    braking_distance = (
+        forward_speed * forward_speed / (2.0 * comfortable_decel_mps2)
+    )
+    forward_distance = (
+        max(
+            BACK_TRANSITION_MIN_FORWARD_M,
+            schedule_distance,
+            braking_distance,
+        )
+        + BACK_TRANSITION_BUFFER_M
+    )
+    return route_projection + forward_distance * forward, forward_distance
+
+
+def supervise_manual_phase(
+    sim: TiltrotorSimulation,
+    settled_time_s: float,
+    dt: float,
+) -> float:
+    """Advance manual phase-completion logic and return updated settle time."""
+    setpoint = sim.commander.setpoint
+    phase = setpoint.phase
+
+    if phase == FlightPhase.VERTICAL_TAKEOFF:
+        altitude_error = abs(float(sim.state["x"][2] - setpoint.altitude_m))
+        settled = (
+            altitude_error < 0.25
+            and abs(float(sim.state["v"][2])) < 0.20
+        )
+        settled_time_s = settled_time_s + dt if settled else 0.0
+        if settled_time_s >= MANUAL_PHASE_SETTLE_S:
+            sim.commander.hover(
+                sim.t,
+                setpoint.altitude_m,
+                setpoint.hold_x_m,
+                setpoint.hold_y_m,
+            )
+            return 0.0
+        return settled_time_s
+
+    if phase == FlightPhase.TRANSITION_TO_HOVER:
+        horizontal_speed = float(np.linalg.norm(sim.state["v"][:2]))
+        vertical_speed = abs(float(sim.state["v"][2]))
+        tilt = abs(float(sim.state["tilt_angle"]))
+        horizontal_error = float(np.linalg.norm(
+            np.array([setpoint.hold_x_m, setpoint.hold_y_m])
+            - np.asarray(sim.state["x"], dtype=float)[:2]
+        ))
+        schedule_finished = sim.commander.phase_progress(sim.t) >= 0.995
+        settled = (
+            horizontal_speed < 0.75
+            and vertical_speed < 0.60
+            and tilt < np.deg2rad(6.0)
+            and (horizontal_error < 4.0 or schedule_finished)
+        )
+        settled_time_s = settled_time_s + dt if settled else 0.0
+        if settled_time_s >= MANUAL_PHASE_SETTLE_S:
+            sim.commander.hover(
+                sim.t,
+                setpoint.altitude_m,
+                setpoint.hold_x_m,
+                setpoint.hold_y_m,
+            )
+            return 0.0
+        return settled_time_s
+
+    return 0.0
 
 
 def _empty_source() -> ColumnDataSource:
@@ -149,11 +254,43 @@ def build_dashboard(
         )
 
     def back_transition() -> None:
+        setpoint = sim.commander.setpoint
+        if setpoint.phase == FlightPhase.TRANSITION_TO_HOVER:
+            runtime["automatic"] = False
+            runtime["mission"] = None
+            start_running()
+            status.text = (
+                "<b>Transition → hover is already active.</b> "
+                "The existing stop point and tilt schedule were preserved."
+            )
+            return
+        if setpoint.phase not in (
+            FlightPhase.TRANSITION_TO_CRUISE,
+            FlightPhase.CRUISE,
+        ):
+            status.text = (
+                "<b>Transition → hover requires forward-flight mode.</b> "
+                "Start transition-to-cruise or cruise first."
+            )
+            return
+
         enter_manual_mode()
+        hover_target, forward_distance = planned_hover_target(
+            sim.state,
+            setpoint,
+            duration_s=BACK_TRANSITION_DURATION_S,
+        )
         sim.commander.transition_to_hover(
-            sim.t, target_altitude(),
-            sim.state["x"][0] + 25.0,
-            sim.commander.setpoint.hold_y_m,
+            sim.t,
+            target_altitude(),
+            float(hover_target[0]),
+            float(hover_target[1]),
+            duration_s=BACK_TRANSITION_DURATION_S,
+        )
+        back_btn.disabled = True
+        status.text = (
+            "<b>Transition → hover started.</b> "
+            f"Fixed stop target is {forward_distance:.1f} m ahead on the route."
         )
 
     def land() -> None:
@@ -184,6 +321,7 @@ def build_dashboard(
         runtime["automatic"] = False
         runtime["mission"] = None
         runtime["paused"] = True
+        back_btn.disabled = False
         pause_btn.label = "Start"
         status.text = "<b>Reset complete — choose a command.</b>"
 
@@ -322,26 +460,6 @@ def build_dashboard(
     callback_period_s = 0.05
     sim_substeps = max(1, int(round(callback_period_s / sim.dt)))
 
-    def manual_phase_supervisor(dt: float) -> None:
-        setpoint = sim.commander.setpoint
-        if setpoint.phase == FlightPhase.VERTICAL_TAKEOFF:
-            altitude_error = abs(
-                float(sim.state["x"][2] - setpoint.altitude_m)
-            )
-            settled = (
-                altitude_error < 0.25
-                and abs(float(sim.state["v"][2])) < 0.20
-            )
-            runtime["manual_settle_s"] = (
-                runtime["manual_settle_s"] + dt if settled else 0.0
-            )
-            if runtime["manual_settle_s"] >= 0.75:
-                sim.commander.hover(
-                    sim.t, setpoint.altitude_m,
-                    setpoint.hold_x_m, setpoint.hold_y_m,
-                )
-                runtime["manual_settle_s"] = 0.0
-
     def tick() -> None:
         if runtime["paused"]:
             return
@@ -355,9 +473,16 @@ def build_dashboard(
                     pause_btn.label = "Start"
                     break
             else:
-                manual_phase_supervisor(sim.dt)
+                runtime["manual_settle_s"] = supervise_manual_phase(
+                    sim,
+                    runtime["manual_settle_s"],
+                    sim.dt,
+                )
             sim.step(wind)
 
+        back_btn.disabled = (
+            sim.commander.setpoint.phase == FlightPhase.TRANSITION_TO_HOVER
+        )
         runtime["plot_counter"] += 1
         refresh_hz = int(update_rate.value.split()[0])
         stream_every = max(
