@@ -3,6 +3,13 @@ from .commands import AutomaticMission, CommandManager, FlightPhase, FlightSetpo
 from .controller import TiltrotorController
 from .mission import MissionTrajectory
 from .parameters import default_tiltrotor_params, initial_state
+from .scenarios import (
+    ComfortLimits,
+    PassengerComfortMonitor,
+    UrbanWindModel,
+    WindScenarioConfig,
+    WindSample,
+)
 from .simulator import TiltrotorSimulation
 from .vehicle import Tiltrotor
 
@@ -15,6 +22,11 @@ __all__ = [
     "MissionTrajectory",
     "default_tiltrotor_params",
     "initial_state",
+    "ComfortLimits",
+    "PassengerComfortMonitor",
+    "UrbanWindModel",
+    "WindScenarioConfig",
+    "WindSample",
     "TiltrotorSimulation",
     "Tiltrotor",
 ]
