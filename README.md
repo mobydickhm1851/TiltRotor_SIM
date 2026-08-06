@@ -12,6 +12,16 @@ RotorPy-compatible reduced-order quad tiltrotor simulation with:
 
 > This is a transparent reduced-order research prototype. It is not a certified or flight-validated aircraft model.
 
+## v0.3.2 manual transition-to-hover correction
+
+- Repeated **Transition → hover** clicks no longer restart the nacelle schedule or move the stopping target farther forward.
+- The button is disabled while a manual back transition is active.
+- The stopping point is placed once on the route centreline using forward speed, transition duration, and a comfortable-deceleration estimate instead of a fixed 25 m offset.
+- Manual mode automatically changes from `TRANSITION_TO_HOVER` to `HOVER` after airspeed, vertical speed, and nacelle tilt remain settled.
+- The planned hover point is preserved when the phase changes.
+
+See [`MANUAL_BACK_TRANSITION_FIX_REPORT.md`](MANUAL_BACK_TRANSITION_FIX_REPORT.md) for the failure mechanism, formula, thresholds, and limitations.
+
 ## v0.3 position-hold and guidance corrections
 
 - Vertical climb no longer activates the conventional fixed-wing coefficient model from a spurious `-90°` angle of attack.
@@ -79,7 +89,7 @@ The live dashboard exposes:
 - Vertical landing
 - Automatic full mission
 
-Manual takeoff automatically changes to hover after altitude and vertical speed remain within the settling thresholds.
+Manual takeoff automatically changes to hover after altitude and vertical speed remain within the settling thresholds. Manual back transition now automatically changes to hover after the aircraft has decelerated and the nacelles have returned to the hover orientation.
 
 ## Online execution with GitHub Codespaces
 
