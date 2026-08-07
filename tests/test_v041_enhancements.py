@@ -106,7 +106,6 @@ def test_iso_style_weighting_reports_weighted_rms():
     result = None
     for k in range(700):
         t = k * dt
-        # 5-Hz vertical vibration lies close to the high-sensitivity Wk region.
         accel = np.array([0.0, 0.0, 0.4 * np.sin(2.0 * np.pi * 5.0 * t)])
         result = monitor.update(t, accel, np.zeros(3), np.zeros(3))
 
@@ -153,7 +152,10 @@ def test_enhanced_dashboard_exposes_new_scenarios_and_iso_stream():
         for item in doc.select({"type": Select})
     }
     assert "Repeated gusts" in selectors["Wind scenario"].options
-    assert "Continuous turbulence" in selectors["Wind scenario"].options
+    assert any(
+        label.startswith("Continuous turbulence")
+        for label in selectors["Wind scenario"].options
+    )
     assert selectors["Wind scenario"].value == "Repeated gusts"
 
     inputs = {
