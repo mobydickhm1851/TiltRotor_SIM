@@ -8,7 +8,7 @@ from rotorpy_tiltrotor.scenarios import (
 )
 
 
-def test_discrete_gust_is_smooth_and_bounded():
+def test_discrete_gust_is_smooth_bounded_and_relative_to_enable():
     model = UrbanWindModel(WindScenarioConfig(
         enabled=True,
         mode="discrete_gust",
@@ -20,10 +20,12 @@ def test_discrete_gust_is_smooth_and_bounded():
     ))
     state = {"x": np.array([0.0, 0.0, 30.0])}
 
-    before = model.sample(9.0, state)
-    middle = model.sample(12.0, state)
-    after = model.sample(15.0, state)
+    enabled = model.sample(100.0, state)
+    before = model.sample(109.0, state)
+    middle = model.sample(112.0, state)
+    after = model.sample(115.0, state)
 
+    assert np.allclose(enabled.vector_mps, [1.0, 0.0, 0.0])
     assert np.allclose(before.vector_mps, [1.0, 0.0, 0.0])
     assert middle.active
     assert middle.disturbance_mps[1] > 5.9
@@ -57,8 +59,12 @@ def test_urban_wake_is_repeatable():
         wake_frequency_hz=0.4,
     )
     state = {"x": np.array([0.0, 0.0, 30.0])}
-    a = UrbanWindModel(cfg).sample(5.0, state)
-    b = UrbanWindModel(cfg).sample(5.0, state)
+    model_a = UrbanWindModel(cfg)
+    model_b = UrbanWindModel(cfg)
+    model_a.sample(0.0, state)
+    model_b.sample(0.0, state)
+    a = model_a.sample(5.0, state)
+    b = model_b.sample(5.0, state)
 
     assert a.active
     assert np.allclose(a.vector_mps, b.vector_mps)
