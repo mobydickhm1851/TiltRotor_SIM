@@ -1,91 +1,66 @@
 # v0.4.2 Continuous-Turbulence and Comfort-Jerk Correction
 
-## 1. Why the v0.4.1 turbulence trace looked wrong
+## Why the v0.4.1 turbulence trace looked wrong
 
-The v0.4.1 `Continuous turbulence` option used a three-axis Ornstein-Uhlenbeck (OU) proxy. With the dashboard default disturbance amplitude of 5 m/s, the process created large simultaneous x/y/z wind variations with a short correlation time. During transition, the low-speed tiltrotor then experienced rapid changes in relative airspeed, angle of attack and sideslip. The reduced-order wing model and flight controller were driven far outside the nominal transition envelope, producing control-surface/rotor saturation and eventual loss of altitude and attitude.
+The v0.4.1 `Continuous turbulence` option used a three-axis Ornstein-Uhlenbeck proxy. With the generic 5 m/s disturbance setting it produced large simultaneous x/y/z wind variations with a short correlation time. During low-speed transition this drove rapid changes in relative airspeed, angle of attack and sideslip, pushed the reduced-order aerodynamics/controller outside their nominal envelope, saturated actuators and could produce loss of altitude and attitude.
 
-That model was useful as a generic stochastic disturbance but it should not have been labelled as aviation-regulation-style continuous turbulence.
+That process was a generic stochastic stress test, not a good aviation-regulation representation.
 
-## 2. What FAR/CS 25.341 actually defines
+## Aviation-regulation references are not all the same turbulence model
 
-14 CFR 25.341(b) and EASA CS 25.341 define continuous turbulence for transport-airplane gust-load analysis. The important modelling assumptions are:
+### FAR / CS 25.341 — transport-airplane structural gust loads
 
-- vertical and lateral continuous turbulence responses are considered;
-- the random atmosphere is represented by a Gaussian distribution of gust velocity;
-- the normalized power spectral density is the Von Karman spectrum;
-- turbulence scale length is L = 2500 ft = 762 m;
-- the regulatory intensity U_sigma is a structural limit-load design quantity, not a normal operational wind-speed setting;
-- FAA AC 25.341-1 / EASA AMC 25.341 describe nonlinear time-domain stochastic simulation using a long Gaussian pseudo-random stream conforming to the Von Karman spectrum.
+14 CFR 25.341(b) and EASA CS 25.341 require the dynamic response to vertical and lateral continuous turbulence. AMC 25.341 describes a one-dimensional Gaussian random atmosphere with a Von Karman power spectral density and turbulence scale length L = 2500 ft = 762 m. The regulatory U_sigma values are structural limit-load design quantities. For nonlinear time-domain analysis, AMC guidance uses a long Gaussian pseudo-random stream conforming to the Von Karman spectrum with RMS amplitude 0.4 U_sigma.
 
-For 14 CFR 25.341(b)(5), when required for nonlinear load assessment, the turbulence field RMS velocity is 40% of U_sigma. Near sea level U_sigma_ref itself is approximately 27.43 m/s before the flight-profile factor. Those values are intentionally severe structural-design criteria and are not appropriate as the default everyday urban-turbulence setting for this 25-kg reduced-order eVTOL controller demonstration.
+Near sea level U_sigma_ref is approximately 27.43 m/s before the flight-profile factor. Those numbers are intentionally severe structural-design criteria and must not be misread as routine urban-operation RMS wind for a 25-kg eVTOL.
 
-The FAA operational PIREP categories Light / Moderate / Severe / Extreme are also not fixed turbulence-velocity values. They are defined by the reaction of the aircraft and occupants. Therefore this project does not map a single sigma in m/s directly to an FAA `Moderate turbulence` label.
+### EASA CS-AWO — low-altitude / approach wind and turbulence
 
-## 3. v0.4.2 continuous-turbulence benchmark
+For the project's roughly 30-m urban/vertiport operating region, CS-AWO provides a more useful operational benchmark. Its low-altitude turbulence model treats the turbulence components as Gaussian processes with Von-Karman-form spectra and uses:
 
-The dashboard option is renamed:
+- RMS turbulence intensity: sigma = 0.15 U
+- scale length: L = 183 m (600 ft)
 
-`Continuous turbulence (FAR/CS 25.341-style)`
+where U is the reference mean wind speed.
 
-It uses a finite Fourier synthesis of the normalized one-dimensional Von Karman spectrum
+The v0.4.2 dashboard therefore uses the CS-AWO-style relationship for its default continuous-turbulence operational test rather than Part/CS-25 structural limit intensities.
 
-Phi(Omega) = L/pi * [1 + (8/3)(1.339 L Omega)^2] / [1 + (1.339 L Omega)^2]^(11/6)
+## v0.4.2 dashboard semantics
 
-with
+The option is labelled:
 
-- L = 762 m;
-- Omega = omega / V_ref;
-- V_ref = 15 m/s for the dashboard benchmark;
-- a deterministic random phase set for repeatable A/B tests;
-- a short smooth fade-in to avoid an artificial wind step when the toggle is enabled.
+`Continuous turbulence (CS-AWO low-altitude style)`
 
-The generated unit process is normalized and multiplied by the user-entered
+The user input is:
 
-`Turbulence RMS sigma [m/s]`.
+`Reference mean wind U [m/s] (sigma = 0.15 U)`
 
-The default is 1.0 m/s. This is an engineering controller-test level, not a certification threshold.
+For example, U = 5 m/s gives sigma = 0.75 m/s. This is very different from the old interpretation in which the same numeric value 5 could act like a multi-axis turbulence standard deviation of several m/s.
 
-The current dashboard benchmark applies the turbulence in the vertical direction. This matches one of the one-dimensional FAR/CS continuous-turbulence load cases and avoids falsely presenting a simultaneous three-axis random field as the regulation itself. Repeated gusts and the urban-wake proxy remain available for non-regulatory urban-disturbance studies.
+The simulator uses a deterministic finite Fourier realization of a normalized Von-Karman-type spectrum, a short smooth fade-in, L = 183 m and a 15 m/s reference airspeed. The current default component is vertical so transition altitude/lift robustness can be studied without falsely presenting a simultaneous arbitrary 3-D noise field as the regulation itself. Repeated gusts and the urban-wake proxy remain available for non-regulatory multi-axis disturbance studies.
 
-## 4. Why the comfort guard could still exceed 1.5 m/s^3
+The FAA operational PIREP terms Light / Moderate / Severe / Extreme are not fixed turbulence velocities in m/s. They are defined by aircraft and occupant reactions, so the dashboard intentionally does not convert sigma directly into those labels.
 
-The v0.4.1 guard limited the *commanded acceleration slew rate* to the same numerical value shown as the measured passenger jerk target. The aircraft output does not equal the command exactly because the closed-loop plant contains:
+## Why the comfort guard could still exceed 1.5 m/s^3
 
-- motor first-order dynamics;
-- rotor thrust nonlinearities;
-- ground-contact release at lift-off;
-- attitude-loop coupling;
-- nacelle/actuator dynamics;
-- nonlinear aerodynamic forces.
+v0.4.1 used the passenger-facing jerk target as the commanded acceleration slew-rate limit. Aircraft output is not identical to command because the closed-loop plant contains motor lag, nonlinear rotor thrust, ground-contact release, attitude coupling, nacelle dynamics and aerodynamic response. Therefore a 1.50 m/s^3 command slew limit could still produce a measured kinematic peak around or above 1.50 m/s^3.
 
-Therefore a 1.50 m/s^3 command slew limit could still produce a measured kinematic peak of roughly 1.5-1.8 m/s^3 in nominal takeoff. This is not a contradiction: command jerk and aircraft jerk are different signals.
+## v0.4.2 jerk-guard correction
 
-## 5. v0.4.2 jerk-guard correction
-
-The selected dashboard value remains the passenger-facing measured target:
+The selected dashboard value remains the measured passenger-motion target:
 
 `Measured jerk target = 1.50 m/s^3`.
 
-Internally the controller uses only 60% of that value as the command acceleration slew rate:
+The controller now uses only 60% of that target internally:
 
-j_cmd,max = 0.60 * j_target.
+j_cmd,max = 0.60 j_target
 
-For the default target this gives
-
-j_cmd,max = 0.90 m/s^3.
-
-The 40% headroom is an engineering robustness margin for the reduced-order plant. The actual kinematic jerk is still calculated from integrated velocity and remains the output KPI. Strong external gusts can still make measured jerk exceed the target because a comfort command guard cannot physically cancel arbitrary atmospheric disturbances.
-
-## 6. Interpretation for the assignment
-
-Use two separate statements in the report:
-
-1. **Regulatory-inspired turbulence benchmark**: continuous turbulence is modelled as a one-dimensional Gaussian Von Karman process based on FAR/CS 25.341 assumptions. The selected operational RMS sigma is intentionally much smaller than certification structural-load U_sigma values.
-2. **Passenger comfort guard**: acceleration and jerk commands are shaped conservatively, while the effectiveness of the guard is evaluated using measured kinematic peak jerk, peak acceleration and ISO-style weighted RMS acceleration.
+so the default internal slew limit is 0.90 m/s^3. The remaining 40% is plant-response headroom. Actual kinematic jerk remains the KPI and is not clipped in the plot. Strong external turbulence can still exceed the passenger target; a command governor cannot physically guarantee ride comfort against arbitrarily large atmospheric disturbances.
 
 ## Sources
 
 - 14 CFR 25.341, Gust and turbulence loads: https://www.ecfr.gov/current/title-14/chapter-I/subchapter-C/part-25/subpart-C/section-25.341
 - FAA AC 25.341-1, Dynamic Gust Loads: https://www.faa.gov/regulations_policies/advisory_circulars/index.cfm/go/document.information/documentID/1024906
-- EASA Easy Access Rules for Large Aeroplanes, CS 25.341 / AMC 25.341: https://www.easa.europa.eu/en/document-library/easy-access-rules/easy-access-rules-large-aeroplanes-cs-25
-- FAA AIM, PIREPs Relating to Turbulence / Turbulence Reporting Criteria: https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap7_section_1.html
+- EASA Easy Access Rules for Large Aeroplanes, CS 25.341 / AMC 25.341: https://www.easa.europa.eu/en/document-library/easy-access-rules/online-publications/easy-access-rules-large-aeroplanes-cs-25?page=15
+- EASA Easy Access Rules for All-Weather Operations, low-altitude turbulence model: https://www.easa.europa.eu/en/document-library/easy-access-rules/online-publications/easy-access-rules-all-weather-operations-cs?page=24
+- FAA AIM, PIREP turbulence reporting criteria: https://www.faa.gov/air_traffic/publications/atpubs/aim_html/chap7_section_1.html
