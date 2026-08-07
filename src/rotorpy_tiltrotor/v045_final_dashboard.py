@@ -1,12 +1,14 @@
-"""Final v0.4.5 dashboard: force-feasible comfort tilt and speed semantics.
+"""Final v0.4.5 dashboard: force-feasible comfort and transition semantics.
 
 This layer keeps the v0.4.5 command-envelope/braking/tracking work and adds:
 
 * a comfort-feasible forward-transition nacelle-tilt cap, because a common-axis
   tiltrotor that is still supporting weight can create a large forward thrust
   component even when the requested *net* acceleration is small;
-* a back-transition nacelle schedule that is deliberately decoupled from the
-  much longer comfort-limited stopping time; and
+* a back-transition nacelle schedule deliberately decoupled from the much longer
+  comfort-limited stopping time;
+* jerk-limited re-entry into the comfort acceleration envelope after an altitude
+  safety override; and
 * a separate ground-speed trace, because airspeed does not approach zero in a
   position-holding hover when wind/gust is present.
 """
@@ -19,14 +21,18 @@ from . import v045_dashboard as v045
 from .allocator import rotor_axis
 from .commands import CommandManager, FlightPhase
 from .enhanced_dashboard import ComfortAwareSimulation
-from .math_utils import rotation_matrix, smoothstep01
+from .math_utils import clamp_norm, rotation_matrix, smoothstep01
 from .vehicle import Tiltrotor
 
 
 COMFORT_GEOMETRIC_ACCEL_FRACTION = 0.88
 COMFORT_TILT_CAP_OPEN_RATE_RAD_S = np.deg2rad(7.0)
 BACK_TRANSITION_NACELLE_RETURN_S = 10.0
-FINAL_EXTRA_FIELDS = ["ground_speed_mps", "comfort_tilt_cap_deg"]
+FINAL_EXTRA_FIELDS = [
+    "ground_speed_mps",
+    "comfort_tilt_cap_deg",
+    "comfort_reentry_active",
+]
 
 
 class ForceFeasibleComfortController(v045.ComfortEnvelopeController):
@@ -49,16 +55,24 @@ class ForceFeasibleComfortController(v045.ComfortEnvelopeController):
     nacelles are close to vertical.  Therefore nacelle conversion and vehicle
     braking use separate time scales: the nacelles return smoothly from 90 to 0
     deg in about 10 s, while a 15 m/s aircraft with a 0.5 m/s^2 comfort target
-    still needs about 30+ s to stop.  This removes the previous deadlock in which
-    speed had to fall before the geometry capable of producing braking was made
-    available.
+    still needs about 30+ s to stop.
 
-    Altitude safety remains higher priority than comfort in both directions.
+    Comfort re-entry
+    ----------------
+    An altitude-safety override may legitimately leave the acceleration command
+    outside the passenger comfort sphere.  When safety clears, instantly
+    projecting (for example) 2.0 m/s^2 back to 0.5 m/s^2 would itself create a
+    very large command jerk.  Re-entry therefore follows the selected command
+    jerk envelope.  During this short recovery the acceleration command can
+    remain above the nominal target while monotonically returning toward it.
+
+    Altitude safety remains higher priority than comfort in all cases.
     """
 
     def reset(self) -> None:
         super().reset()
         self._comfort_tilt_cap_rad = float(self.params["tilt_min"])
+        self.comfort_reentry_active = False
 
     def _comfort_guard_active(self) -> bool:
         return (
@@ -66,6 +80,54 @@ class ForceFeasibleComfortController(v045.ComfortEnvelopeController):
             or float(self.max_accel)
             < self.safety_max_accel_mps2 - 1e-9
         )
+
+    def _desired_velocity_and_acceleration(self, t: float, state: dict):
+        previous = self._last_priority_accel_world.copy()
+        v_ref, target = super()._desired_velocity_and_acceleration(t, state)
+        target = np.asarray(target, dtype=float)
+        self.comfort_reentry_active = False
+
+        if not self._comfort_guard_active():
+            return v_ref, target
+
+        safety = float(self.safety_override_factor)
+        comfort_limit = max(0.05, min(
+            float(self.max_accel), self.safety_max_accel_mps2
+        ))
+        previous_norm = float(np.linalg.norm(previous))
+        jerk_target = self.max_command_jerk_mps3
+
+        # Parent v0.4.5 correctly hard-bounds nominal commands, but if the
+        # *previous* command came from a safety override it may be outside that
+        # sphere.  Replacing it with a point on the 0.5 sphere in one 0.01-s
+        # frame would violate the jerk target.  Undo only that radial jump and
+        # move from the prior safe command toward the new nominal target at the
+        # jerk-limited rate.
+        if (
+            safety <= v045.NORMAL_SAFETY_RELEASE_THRESHOLD
+            and previous_norm > comfort_limit + 1e-6
+            and jerk_target is not None
+            and jerk_target > 0.0
+            and self._control_dt > 0.0
+        ):
+            internal_jerk = max(
+                0.02,
+                float(jerk_target) * float(self.command_jerk_headroom),
+            )
+            delta = clamp_norm(
+                target - previous,
+                internal_jerk * self._control_dt,
+            )
+            target = previous + delta
+            self._last_priority_accel_world = target.copy()
+            self.last_command_jerk_norm_mps3 = float(
+                np.linalg.norm(delta) / self._control_dt
+            )
+            self.comfort_reentry_active = (
+                float(np.linalg.norm(target)) > comfort_limit + 1e-6
+            )
+
+        return v_ref, target
 
     def _raw_comfort_tilt_limit(self, state: dict) -> float:
         comfort_limit = max(0.05, min(
@@ -191,6 +253,9 @@ class ForceFeasibleComfortController(v045.ComfortEnvelopeController):
         control["comfort_tilt_cap_deg"] = np.array(float(
             np.rad2deg(self._comfort_tilt_cap_rad)
         ))
+        control["comfort_reentry_active"] = np.array(float(
+            self.comfort_reentry_active
+        ))
         return control
 
 
@@ -201,6 +266,9 @@ def sample_to_record_final(sample, params: dict) -> dict:
     ))
     rec["comfort_tilt_cap_deg"] = float(
         sample.control.get("comfort_tilt_cap_deg", np.nan)
+    )
+    rec["comfort_reentry_active"] = float(
+        sample.control.get("comfort_reentry_active", 0.0)
     )
     return rec
 
