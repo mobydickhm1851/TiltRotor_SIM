@@ -10,12 +10,15 @@ Priority order used by this module:
 Comfort targets therefore remain soft engineering constraints.  When altitude
 loss or downward velocity becomes safety-relevant, vertical acceleration and
 jerk authority are progressively released and nacelle tilt is biased back
-toward a configuration that can support weight.
+toward a configuration that can support weight. Horizontal tracking is also
+progressively suppressed so the aircraft does not trade vertical lift for
+position/speed recovery while altitude is unsafe.
 """
 from __future__ import annotations
 
 import numpy as np
 from bokeh.models import Div, NumericInput, Select, Toggle
+from scipy.spatial.transform import Rotation
 
 from . import dashboard as base_dashboard
 from . import v042_dashboard as v042
@@ -34,15 +37,29 @@ ALTITUDE_DEFICIT_FULL_M = 1.50
 DESCENT_RATE_START_MPS = 0.25
 DESCENT_RATE_FULL_MPS = 1.20
 CRUISE_SAFETY_TILT_REDUCTION = np.deg2rad(28.0)
+SAFETY_HORIZONTAL_RETAIN_FRACTION = 0.03
+WIND_FEEDFORWARD_TAU_S = 0.85
+MAX_CRAB_FEEDFORWARD_RAD = np.deg2rad(30.0)
+MAX_FLOW_PITCH_FEEDFORWARD_RAD = np.deg2rad(14.0)
+
+
+def _wrap_pi(angle: float) -> float:
+    return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
 
 
 class SafetyPriorityController(v043.BackTransitionSafeController):
-    """Hierarchical controller: safety can override passenger comfort.
+    """Hierarchical controller: safety can override comfort and tracking.
 
     The base dashboard stores the user comfort-acceleration target in
-    ``controller.max_accel`` when the guard is enabled.  v0.4.4 interprets that
+    ``controller.max_accel`` when the guard is enabled. v0.4.4 interprets that
     value as a *comfort* limit, not as the aircraft's absolute control authority.
     The original 4 m/s^2 authority remains available to recover altitude.
+
+    A second arbitration layer applies even when Comfort Guard is OFF: once an
+    altitude safety factor grows, horizontal path/speed acceleration is faded
+    almost to zero. This prevents a fixed-point or speed controller from tilting
+    the aircraft aggressively while rotor thrust is needed primarily to arrest
+    a descent.
     """
 
     vertical_floor_phases = set(
@@ -62,6 +79,8 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
         self._last_priority_accel_world = np.zeros(3)
         self.safety_override_factor = 0.0
         self.safety_override_active = False
+        self._filtered_crab_rad = 0.0
+        self._filtered_flow_pitch_rad = 0.0
 
     def _altitude_safety_factor(self, state: dict) -> float:
         sp = self.commander.setpoint
@@ -70,11 +89,9 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
             return 0.0
 
         # Being below the final target is expected during a vertical takeoff;
-        # do not call the entire climb an emergency.  A genuine downward motion
+        # do not call the entire climb an emergency. A genuine downward motion
         # during takeoff can still trigger the descent-rate part of the guard.
-        if phase == FlightPhase.VERTICAL_TAKEOFF:
-            deficit_factor = 0.0
-        elif phase == FlightPhase.VERTICAL_LANDING:
+        if phase in (FlightPhase.VERTICAL_TAKEOFF, FlightPhase.VERTICAL_LANDING):
             deficit_factor = 0.0
         else:
             deficit = max(0.0, float(sp.altitude_m - state["x"][2]))
@@ -95,8 +112,8 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
 
     def _desired_velocity_and_acceleration(self, t: float, state: dict):
         # ``max_accel`` may have been reduced by the dashboard to the comfort
-        # target.  Temporarily restore full flight-control authority while the
-        # baseline command is computed, then apply comfort shaping below.
+        # target. Temporarily restore full flight-control authority while the
+        # baseline command is computed, then arbitrate priorities below.
         configured_limit = float(self.max_accel)
         guard_active = (
             self.max_command_jerk_mps3 is not None
@@ -117,19 +134,34 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
         self.safety_override_factor = safety
         self.safety_override_active = safety > 0.05
 
+        # This tracking fade applies regardless of Comfort Guard. The first
+        # v0.4.4 regression showed safety=1 while the aircraft was still being
+        # driven to very high horizontal speed during back transition. Once
+        # altitude is unsafe, path/speed recovery must yield to lift recovery.
+        tracking_scale = (
+            1.0
+            - safety * (1.0 - SAFETY_HORIZONTAL_RETAIN_FRACTION)
+        )
+        safety_horizontal = raw_accel[:2] * tracking_scale
+
         if not guard_active:
-            self._last_priority_accel_world = raw_accel.copy()
-            return v_ref, raw_accel
+            target = np.array([
+                safety_horizontal[0],
+                safety_horizontal[1],
+                float(raw_accel[2]),
+            ])
+            self._last_priority_accel_world = target.copy()
+            return v_ref, target
 
         comfort_limit = max(0.05, min(
             configured_limit,
             self.safety_max_accel_mps2,
         ))
 
-        # Comfort owns horizontal manoeuvring authority.  Vertical authority is
-        # comfort-limited only while altitude is healthy; safety progressively
-        # blends back to the unrestricted altitude command when needed.
-        horizontal = clamp_norm(raw_accel[:2], comfort_limit)
+        # Comfort owns horizontal manoeuvring authority while safety can reduce
+        # it further. Vertical authority is comfort-limited only while altitude
+        # is healthy; safety progressively restores the unrestricted command.
+        horizontal = clamp_norm(safety_horizontal, comfort_limit)
         nominal_vertical = float(np.clip(
             raw_accel[2], -comfort_limit, comfort_limit
         ))
@@ -158,8 +190,7 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
             )
 
             # Passenger jerk remains the nominal target, but vertical emergency
-            # recovery may exceed it.  This exceedance is intentionally visible
-            # in the comfort KPI rather than being clipped from the measurement.
+            # recovery may exceed it. The measured exceedance remains visible.
             vertical_jerk_limit = (
                 (1.0 - safety) * internal_jerk
                 + safety * self.emergency_vertical_jerk_mps3
@@ -175,8 +206,8 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
                 previous[2] + delta_z,
             ])
 
-        # Do not reapply the comfort norm here: doing so would again steal
-        # vertical authority during a safety override.
+        # Do not reapply a 3-D comfort norm here: that would steal vertical
+        # authority again during a safety override.
         target[:2] = clamp_norm(target[:2], comfort_limit)
         target[2] = float(np.clip(
             target[2],
@@ -185,6 +216,97 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
         ))
         self._last_priority_accel_world = target.copy()
         return v_ref, target
+
+    def _desired_attitude(
+        self,
+        state: dict,
+        a_cmd_world: np.ndarray,
+    ) -> Rotation:
+        """Add low-pass wind-relative pitch/crab feed-forward in wing flight.
+
+        Holding the ground-route yaw at exactly zero under a 10 m/s crosswind
+        forces the wing to carry a very large sideslip. Likewise, a -2.25 m/s
+        vertical wind changes the relative-flow angle enough to remove much of
+        the nominal CL0 lift if the body remains level. A wing-borne aircraft
+        normally crabs into crosswind and pitches relative to the air mass.
+
+        The feed-forward is deliberately bounded and low-pass filtered because
+        repeated gusts should not be followed sample-for-sample by yaw/pitch.
+        Rotor-borne flight receives almost none of this correction.
+        """
+        sp = self.commander.setpoint
+        route_heading = float(sp.heading_rad)
+        forward = np.array([
+            np.cos(route_heading), np.sin(route_heading), 0.0
+        ])
+        lateral = np.array([
+            -np.sin(route_heading), np.cos(route_heading), 0.0
+        ])
+        lateral_accel = float(np.dot(a_cmd_world, lateral))
+        forward_accel = float(np.dot(a_cmd_world, forward))
+        vertical_rotor_fraction = float(
+            np.cos(float(state["tilt_angle"])) ** 2
+        )
+        wing_fraction = 1.0 - vertical_rotor_fraction
+
+        roll_cmd = float(np.clip(
+            -lateral_accel / self.params["gravity"],
+            -0.20,
+            0.20,
+        ))
+        pitch_cmd = (
+            vertical_rotor_fraction
+            * forward_accel
+            / self.params["gravity"]
+            - 0.75
+            * wing_fraction
+            * a_cmd_world[2]
+            / self.params["gravity"]
+        )
+
+        wind = np.asarray(state.get("wind", np.zeros(3)), dtype=float)
+        air_relative_world = np.asarray(state["v"], dtype=float) - wind
+        horizontal_air = float(np.linalg.norm(air_relative_world[:2]))
+        if horizontal_air > 2.0:
+            airflow_heading = float(np.arctan2(
+                air_relative_world[1], air_relative_world[0]
+            ))
+            raw_crab = np.clip(
+                _wrap_pi(airflow_heading - route_heading),
+                -MAX_CRAB_FEEDFORWARD_RAD,
+                MAX_CRAB_FEEDFORWARD_RAD,
+            )
+            raw_flow_pitch = float(np.clip(
+                -np.arctan2(air_relative_world[2], horizontal_air),
+                -MAX_FLOW_PITCH_FEEDFORWARD_RAD,
+                MAX_FLOW_PITCH_FEEDFORWARD_RAD,
+            ))
+        else:
+            raw_crab = 0.0
+            raw_flow_pitch = 0.0
+
+        dt = max(float(self._control_dt), 1e-3)
+        alpha = float(np.clip(
+            dt / (WIND_FEEDFORWARD_TAU_S + dt), 0.0, 1.0
+        ))
+        self._filtered_crab_rad += alpha * (
+            float(raw_crab) - self._filtered_crab_rad
+        )
+        self._filtered_flow_pitch_rad += alpha * (
+            raw_flow_pitch - self._filtered_flow_pitch_rad
+        )
+
+        # If altitude is already unsafe, level-flight safety is more important
+        # than aggressively following a changing crosswind crab demand.
+        safety = self._altitude_safety_factor(state)
+        wind_ff_blend = wing_fraction * (1.0 - 0.55 * safety)
+        yaw_cmd = route_heading + wind_ff_blend * self._filtered_crab_rad
+        pitch_cmd += wind_ff_blend * self._filtered_flow_pitch_rad
+        pitch_cmd = float(np.clip(pitch_cmd, -0.26, 0.26))
+
+        return Rotation.from_euler(
+            "xyz", [roll_cmd, pitch_cmd, yaw_cmd]
+        )
 
     def _tilt_command(self, t: float, state: dict) -> float:
         sp = self.commander.setpoint
@@ -210,8 +332,8 @@ class SafetyPriorityController(v043.BackTransitionSafeController):
             elapsed = self.commander.phase_progress(t)
 
             # Never hand lift to the wing faster than forward airspeed is being
-            # established.  This is crucial when a 0.5 m/s^2 comfort target
-            # makes acceleration much slower than the nominal 12-s schedule.
+            # established. This is crucial when a 0.5 m/s^2 comfort target makes
+            # acceleration much slower than the nominal 12-s schedule.
             airspeed_cap = 0.05 + 0.95 * speed_progress
             progress = min(elapsed, airspeed_cap)
 
@@ -364,8 +486,9 @@ def build_dashboard(doc, simulation=None):
         priority_status.text = (
             f"{state} &nbsp; <b>Altitude-priority factor:</b> {factor:.2f}. "
             "Policy: altitude/attitude safety → path tracking → passenger comfort. "
-            "When the safety override is active, vertical acceleration or jerk "
-            "may exceed the comfort target; the measured exceedance remains visible."
+            "When the safety override is active, horizontal tracking yields first; "
+            "vertical acceleration or jerk may exceed the comfort target and the "
+            "measured exceedance remains visible."
         )
 
     root = doc.roots[0]
