@@ -1,17 +1,19 @@
 """v0.4.2 operational dashboard corrections.
 
-For this project's low-altitude urban transition demonstration, the default
-continuous-turbulence benchmark is based on the EASA CS-AWO low-altitude model:
+For the project's low-altitude urban transition demonstration, continuous
+vertical turbulence follows the low-altitude alternative described in EASA
+CS-AWO wind model No. 1:
 
-* Gaussian process;
-* Von Karman-type spectrum;
-* scale length L = 183 m (600 ft);
-* RMS turbulence intensity sigma = 0.15 U, where U is reference mean wind.
+* Gaussian / Von-Karman-form turbulence;
+* vertical RMS intensity sigma_w = 0.09 U;
+* vertical scale L_w = 4.6 m below 9.2 m altitude;
+* L_w = 0.5 z for 9.2 < z < 305 m.
 
-The finite synthesis is restricted to 0.005--0.5 Hz because the current vehicle
-is a reduced-order rigid-body model without structural vibration modes.  The
-underlying Von Karman shape and CS-AWO scale/intensity assumptions are retained,
-but this is an engineering controller benchmark, not certification evidence.
+For reference, the same CS-AWO section gives sigma=0.15 U and L=183 m for the
+horizontal components; those horizontal values must not be applied directly to
+the vertical component.  The current benchmark deliberately tests the vertical
+component because loss of altitude/lift is the critical transition failure seen
+in the dashboard. It is an engineering benchmark, not certification evidence.
 """
 from __future__ import annotations
 
@@ -22,23 +24,35 @@ from . import dashboard as base_dashboard
 from . import enhanced_dashboard as enhanced
 
 
-CS_AWO_TURBULENCE_SCALE_M = 183.0
-CS_AWO_SIGMA_RATIO = 0.15
+CS_AWO_HORIZONTAL_SIGMA_RATIO = 0.15
+CS_AWO_HORIZONTAL_SCALE_M = 183.0
+CS_AWO_VERTICAL_SIGMA_RATIO = 0.09
 CS_AWO_REFERENCE_AIRSPEED_MPS = 15.0
 CS_AWO_COMPONENTS = 256
 CS_AWO_MIN_FREQUENCY_HZ = 0.005
-CS_AWO_MAX_FREQUENCY_HZ = 0.5
+CS_AWO_MAX_FREQUENCY_HZ = 1.0
 CS_AWO_FADE_IN_S = 3.0
-CS_AWO_LABEL = "Continuous turbulence (CS-AWO low-altitude style)"
+CS_AWO_LABEL = "Continuous turbulence (CS-AWO vertical low-altitude style)"
+
+
+def cs_awo_vertical_scale_m(reference_altitude_m: float) -> float:
+    """Return the low-altitude CS-AWO vertical turbulence scale used here."""
+    z = max(0.0, float(reference_altitude_m))
+    if z < 9.2:
+        return 4.6
+    # This project uses the low-altitude model only. Cap at the 305-m boundary
+    # rather than extrapolating the formula beyond its stated range.
+    return 0.5 * min(z, 305.0)
 
 
 class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
     """One-dimensional vertical CS-AWO-style low-altitude turbulence.
 
-    The generic dashboard disturbance input is interpreted as reference mean
-    wind U for this mode. The turbulence RMS is sigma=0.15 U. If a larger
-    horizontal base-wind magnitude is selected, that magnitude is used as U so
-    turbulence intensity is not understated relative to mean wind.
+    The dashboard disturbance input is interpreted as reference mean wind U.
+    The vertical turbulence RMS is sigma_w=0.09 U. The spectrum scale is based
+    on the configured reference altitude (the target flight altitude), avoiding
+    phase discontinuities that would occur if the spectral basis were rebuilt
+    continuously as instantaneous altitude changed.
     """
 
     def __init__(self, *args, **kwargs):
@@ -56,19 +70,17 @@ class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
         self._awo_phase = np.zeros(0)
 
     def _ensure_awo_basis(self, cfg) -> None:
+        scale_m = cs_awo_vertical_scale_m(cfg.reference_altitude_m)
         key = (
             int(cfg.random_seed),
             CS_AWO_REFERENCE_AIRSPEED_MPS,
+            round(scale_m, 6),
             CS_AWO_MIN_FREQUENCY_HZ,
             CS_AWO_MAX_FREQUENCY_HZ,
         )
         if key == self._awo_key:
             return
 
-        # At V=15 m/s and L=183 m, the characteristic rigid-body turbulence
-        # frequency is O(V/L) ~ 0.08 Hz. The 0.5-Hz upper bound preserves the
-        # relevant low-frequency tail while avoiding artificial structural-band
-        # content that this 6-DOF model cannot represent faithfully.
         frequency_hz = np.logspace(
             np.log10(CS_AWO_MIN_FREQUENCY_HZ),
             np.log10(CS_AWO_MAX_FREQUENCY_HZ),
@@ -76,9 +88,11 @@ class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
         )
         omega = 2.0 * np.pi * frequency_hz
         reduced = omega / CS_AWO_REFERENCE_AIRSPEED_MPS
-        x = 1.339 * CS_AWO_TURBULENCE_SCALE_M * reduced
+        x = 1.339 * scale_m * reduced
+        # Von-Karman-form lateral/vertical normalized spectrum. The finite
+        # synthesis is normalized below, so cfg controls the desired RMS.
         phi_spatial = (
-            CS_AWO_TURBULENCE_SCALE_M
+            scale_m
             / np.pi
             * (1.0 + (8.0 / 3.0) * x * x)
             / np.power(1.0 + x * x, 11.0 / 6.0)
@@ -117,8 +131,8 @@ class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
             float(cfg.disturbance_amplitude_mps),
             horizontal_base,
         )
-        sigma = CS_AWO_SIGMA_RATIO * reference_mean_wind
-        vertical_velocity = sigma * fade * unit_value
+        sigma_w = CS_AWO_VERTICAL_SIGMA_RATIO * reference_mean_wind
+        vertical_velocity = sigma_w * fade * unit_value
         return np.array([0.0, 0.0, vertical_velocity]), True
 
 
@@ -153,7 +167,7 @@ def build_dashboard(doc, simulation=None):
     def set_low_alt_semantics(attr, old, new):
         del attr, old, new
         if wind_mode.value == CS_AWO_LABEL:
-            amplitude.title = "Reference mean wind U [m/s] (sigma = 0.15 U)"
+            amplitude.title = "Reference mean wind U [m/s] (vertical sigma_w = 0.09 U)"
             if float(amplitude.value or 0.0) <= 1.1:
                 amplitude.value = 5.0
         elif amplitude.title.startswith("Reference mean wind"):
@@ -166,14 +180,15 @@ def build_dashboard(doc, simulation=None):
             div.text = (
                 "<h3>v0.4.2 interpretation</h3>"
                 "<b>Comfort guard:</b> 1.50 m/s³ remains the measured passenger-"
-                "motion target; internal command slew uses 60% headroom to "
-                "account for plant dynamics. <b>Continuous turbulence:</b> the "
-                "operational low-altitude benchmark is CS-AWO-style, with "
-                "Gaussian/Von-Karman behaviour, L=183 m (600 ft), sigma=0.15U, "
-                "and a 0.005–0.5 Hz rigid-body synthesis band. The input is "
-                "reference mean wind U, not turbulence standard deviation. "
-                "FAR/CS 25.341 is a separate transport-airplane structural-load "
-                "benchmark and is not the routine 30-m urban-transition default."
+                "motion target; internal command slew uses 60% of the selected "
+                "target to leave plant-response headroom. "
+                "<b>Continuous turbulence:</b> the dashboard now tests the "
+                "CS-AWO low-altitude <i>vertical</i> component: sigma_w=0.09U "
+                "and L_w=0.5z between 9.2 and 305 m (therefore L_w=15 m at a "
+                "30-m target altitude). Horizontal CS-AWO values are different "
+                "(sigma=0.15U, L=183 m) and are not incorrectly reused for the "
+                "vertical axis. FAR/CS 25.341 remains a separate transport-"
+                "airplane structural-load benchmark."
             )
             break
 
