@@ -11,7 +11,7 @@ CS-AWO wind model No. 1:
 
 For reference, the same CS-AWO section gives sigma=0.15 U and L=183 m for the
 horizontal components; those horizontal values must not be applied directly to
-the vertical component.  The current benchmark deliberately tests the vertical
+the vertical component. The current benchmark deliberately tests the vertical
 component because loss of altitude/lift is the critical transition failure seen
 in the dashboard. It is an engineering benchmark, not certification evidence.
 """
@@ -34,26 +34,23 @@ CS_AWO_MAX_FREQUENCY_HZ = 1.0
 CS_AWO_FADE_IN_S = 3.0
 CS_AWO_LABEL = "Continuous turbulence (CS-AWO vertical low-altitude style)"
 
+# v0.4.1 proved that setting the command acceleration slew equal to the desired
+# passenger jerk does not bound the measured aircraft jerk. Motor/thrust and
+# lift-off dynamics amplify the response. Use only 20% internally, leaving 80%
+# plant-response headroom; the plotted/measured jerk is never clipped.
+V042_COMMAND_JERK_HEADROOM = 0.20
+
 
 def cs_awo_vertical_scale_m(reference_altitude_m: float) -> float:
     """Return the low-altitude CS-AWO vertical turbulence scale used here."""
     z = max(0.0, float(reference_altitude_m))
     if z < 9.2:
         return 4.6
-    # This project uses the low-altitude model only. Cap at the 305-m boundary
-    # rather than extrapolating the formula beyond its stated range.
     return 0.5 * min(z, 305.0)
 
 
 class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
-    """One-dimensional vertical CS-AWO-style low-altitude turbulence.
-
-    The dashboard disturbance input is interpreted as reference mean wind U.
-    The vertical turbulence RMS is sigma_w=0.09 U. The spectrum scale is based
-    on the configured reference altitude (the target flight altitude), avoiding
-    phase discontinuities that would occur if the spectral basis were rebuilt
-    continuously as instantaneous altitude changed.
-    """
+    """One-dimensional vertical CS-AWO-style low-altitude turbulence."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -89,8 +86,6 @@ class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
         omega = 2.0 * np.pi * frequency_hz
         reduced = omega / CS_AWO_REFERENCE_AIRSPEED_MPS
         x = 1.339 * scale_m * reduced
-        # Von-Karman-form lateral/vertical normalized spectrum. The finite
-        # synthesis is normalized below, so cfg controls the desired RMS.
         phi_spatial = (
             scale_m
             / np.pi
@@ -142,10 +137,17 @@ def _find(doc, model_type, title=None):
             yield model
 
 
+def configure_v042_comfort_governor(sim) -> None:
+    """Apply v0.4.2 plant-response headroom to a comfort-aware controller."""
+    if hasattr(sim.controller, "command_jerk_headroom"):
+        sim.controller.command_jerk_headroom = V042_COMMAND_JERK_HEADROOM
+
+
 def build_dashboard(doc, simulation=None):
     """Build the v0.4.2 low-altitude operational dashboard."""
     enhanced.FixedUrbanWindModel = LowAltitudeCSAWOWindModel
     sim = enhanced.build_dashboard(doc, simulation=simulation)
+    configure_v042_comfort_governor(sim)
 
     wind_mode = next(_find(doc, Select, title="Wind scenario"))
     old_label = "Continuous turbulence (FAR/CS 25.341-style)"
@@ -167,7 +169,9 @@ def build_dashboard(doc, simulation=None):
     def set_low_alt_semantics(attr, old, new):
         del attr, old, new
         if wind_mode.value == CS_AWO_LABEL:
-            amplitude.title = "Reference mean wind U [m/s] (vertical sigma_w = 0.09 U)"
+            amplitude.title = (
+                "Reference mean wind U [m/s] (vertical sigma_w = 0.09 U)"
+            )
             if float(amplitude.value or 0.0) <= 1.1:
                 amplitude.value = 5.0
         elif amplitude.title.startswith("Reference mean wind"):
@@ -179,16 +183,16 @@ def build_dashboard(doc, simulation=None):
         if "v0.4.2 interpretation" in str(div.text):
             div.text = (
                 "<h3>v0.4.2 interpretation</h3>"
-                "<b>Comfort guard:</b> 1.50 m/s³ remains the measured passenger-"
-                "motion target; internal command slew uses 60% of the selected "
-                "target to leave plant-response headroom. "
-                "<b>Continuous turbulence:</b> the dashboard now tests the "
-                "CS-AWO low-altitude <i>vertical</i> component: sigma_w=0.09U "
-                "and L_w=0.5z between 9.2 and 305 m (therefore L_w=15 m at a "
-                "30-m target altitude). Horizontal CS-AWO values are different "
-                "(sigma=0.15U, L=183 m) and are not incorrectly reused for the "
-                "vertical axis. FAR/CS 25.341 remains a separate transport-"
-                "airplane structural-load benchmark."
+                "<b>Comfort guard:</b> 1.50 m/s³ is the measured passenger-motion "
+                "target. The internal command-acceleration slew uses 20% of the "
+                "selected jerk target, leaving 80% headroom for motor, thrust, "
+                "lift-off and closed-loop plant dynamics. Measured jerk is not "
+                "clipped. <b>Continuous turbulence:</b> the dashboard tests the "
+                "CS-AWO low-altitude vertical component: sigma_w=0.09U and "
+                "L_w=0.5z between 9.2 and 305 m (L_w=15 m at a 30-m target). "
+                "Horizontal CS-AWO values are different (sigma=0.15U, L=183 m) "
+                "and are not reused for the vertical axis. FAR/CS 25.341 is a "
+                "separate transport-airplane structural-load benchmark."
             )
             break
 
