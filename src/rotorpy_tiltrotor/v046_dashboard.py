@@ -41,7 +41,7 @@ def _summary_table(results: dict) -> str:
         "<table style='border-collapse:collapse;width:100%;font-size:12px'>"
         "<thead><tr>"
         "<th style='text-align:left;padding:4px'>Loop</th>"
-        "<th style='text-align:left;padding:4px'>Poles</th>"
+        "<th style='text-align:left;padding:4px'>Closed-loop stability</th>"
         "<th style='text-align:left;padding:4px'>PM</th>"
         "<th style='text-align:left;padding:4px'>ωgc [rad/s]</th>"
         "<th style='text-align:left;padding:4px'>BW [rad/s]</th>"
