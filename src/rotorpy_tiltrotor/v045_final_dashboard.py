@@ -1,11 +1,12 @@
 """Final v0.4.5 dashboard: force-feasible comfort tilt and speed semantics.
 
-This thin layer keeps the validated v0.4.5 command-envelope/braking/tracking
-work and adds two items exposed by the latest user trace:
+This layer keeps the v0.4.5 command-envelope/braking/tracking work and adds:
 
 * a comfort-feasible forward-transition nacelle-tilt cap, because a common-axis
   tiltrotor that is still supporting weight can create a large forward thrust
-  component even when the requested *net* acceleration is small; and
+  component even when the requested *net* acceleration is small;
+* a back-transition nacelle schedule that is deliberately decoupled from the
+  much longer comfort-limited stopping time; and
 * a separate ground-speed trace, because airspeed does not approach zero in a
   position-holding hover when wind/gust is present.
 """
@@ -18,28 +19,41 @@ from . import v045_dashboard as v045
 from .allocator import rotor_axis
 from .commands import CommandManager, FlightPhase
 from .enhanced_dashboard import ComfortAwareSimulation
-from .math_utils import rotation_matrix
+from .math_utils import rotation_matrix, smoothstep01
 from .vehicle import Tiltrotor
 
 
 COMFORT_GEOMETRIC_ACCEL_FRACTION = 0.88
 COMFORT_TILT_CAP_OPEN_RATE_RAD_S = np.deg2rad(7.0)
+BACK_TRANSITION_NACELLE_RETURN_S = 10.0
 FINAL_EXTRA_FIELDS = ["ground_speed_mps", "comfort_tilt_cap_deg"]
 
 
 class ForceFeasibleComfortController(v045.ComfortEnvelopeController):
-    """Add a force-geometry nacelle cap to the nominal comfort governor.
+    """Make comfort commands consistent with the shared-axis thrust geometry.
 
-    For a shared tilt angle, rotor force that is required to support weight also
-    produces forward thrust.  At low airspeed, before the wing carries much of
-    the weight, this geometric coupling can dominate the requested acceleration.
-    The cap estimates the current aerodynamic force and only permits a nacelle
-    angle whose quasi-steady forward acceleration remains inside most of the
-    selected comfort envelope.  The remaining margin is left for attitude,
-    actuator and aerodynamic transients.
+    Forward transition
+    ------------------
+    Rotor force that is still required to support weight also produces forward
+    thrust when the nacelles are tilted.  The forward-transition cap estimates
+    the current aerodynamic force and only permits a nacelle angle whose
+    quasi-steady forward acceleration remains inside most of the selected
+    comfort envelope.  The remaining margin is left for attitude, actuator and
+    aerodynamic transients.
 
-    The cap is a nominal-comfort feature only. Altitude safety override retains
-    authority to violate the passenger target when necessary.
+    Back transition
+    ---------------
+    A negative longitudinal acceleration cannot be realised efficiently while
+    the common rotor axis is still strongly tilted forward.  The body can create
+    a small backward thrust-vector component with negative pitch only after the
+    nacelles are close to vertical.  Therefore nacelle conversion and vehicle
+    braking use separate time scales: the nacelles return smoothly from 90 to 0
+    deg in about 10 s, while a 15 m/s aircraft with a 0.5 m/s^2 comfort target
+    still needs about 30+ s to stop.  This removes the previous deadlock in which
+    speed had to fall before the geometry capable of producing braking was made
+    available.
+
+    Altitude safety remains higher priority than comfort in both directions.
     """
 
     def reset(self) -> None:
@@ -112,10 +126,35 @@ class ForceFeasibleComfortController(v045.ComfortEnvelopeController):
                 hi = mid
         return float(lo)
 
+    def _back_transition_tilt_command(self, t: float, state: dict) -> float:
+        """Return nacelles vertically on a dedicated ~10 s schedule.
+
+        The actuator itself is limited to 18 deg/s.  A 10 s smoothstep has a
+        peak requested schedule rate of about 13.5 deg/s, so this trajectory is
+        dynamically feasible without simply slamming the tilt actuator into its
+        hard rate limit.  Altitude safety can only make the return more vertical.
+        """
+        sp = self.commander.setpoint
+        elapsed_s = max(0.0, float(t) - float(sp.entered_at_s))
+        time_progress = float(np.clip(
+            elapsed_s / BACK_TRANSITION_NACELLE_RETURN_S,
+            0.0,
+            1.0,
+        ))
+        safety = self._altitude_safety_factor(state)
+        progress = max(time_progress, float(safety))
+        return float(self.params["tilt_max"]) * (
+            1.0 - float(smoothstep01(progress))
+        )
+
     def _tilt_command(self, t: float, state: dict) -> float:
-        base_cmd = float(super()._tilt_command(t, state))
         phase = self.commander.setpoint.phase
 
+        if phase == FlightPhase.TRANSITION_TO_HOVER:
+            self._comfort_tilt_cap_rad = float(self.params["tilt_max"])
+            return self._back_transition_tilt_command(t, state)
+
+        base_cmd = float(super()._tilt_command(t, state))
         if (
             phase != FlightPhase.TRANSITION_TO_CRUISE
             or not self._comfort_guard_active()
