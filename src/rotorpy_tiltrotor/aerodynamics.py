@@ -111,8 +111,15 @@ def aerodynamic_wrench(
     qbar_raw = 0.5 * rho * V * V
     qbar = qbar_raw * wing_blend
 
+    # Both the longitudinal and lateral/directional coefficient sets are local
+    # linear models. Alpha already had a soft stall saturation. Apply the same
+    # principle to beta so low-speed crosswind cannot extrapolate C_Y/C_l/C_n
+    # to unrealistic +/-90-degree sideslip moments during hover/back transition.
     a_stall = params["alpha_stall"]
     alpha_eff = a_stall * np.tanh(alpha / max(a_stall, 1e-6))
+    beta_limit = float(params.get("beta_linear_limit", np.deg2rad(20.0)))
+    beta_eff = beta_limit * np.tanh(beta / max(beta_limit, 1e-6))
+
     p_hat = p * b / (2.0 * V)
     q_hat = q * c / (2.0 * V)
     r_hat = r * b / (2.0 * V)
@@ -120,13 +127,13 @@ def aerodynamic_wrench(
     CL = params["CL0"] + params["CL_alpha"] * alpha_eff + params["CL_de"] * de
     CD = params["CD0"] + params["CD_k"] * CL * CL
     CY = (
-        params["CY_beta"] * beta
+        params["CY_beta"] * beta_eff
         + params["CY_p"] * p_hat
         + params["CY_r"] * r_hat
         + params["CY_dr"] * dr
     )
     Cl = (
-        params["Cl_beta"] * beta
+        params["Cl_beta"] * beta_eff
         - params["Cl_p_damp"] * p_hat
         + params["Cl_r"] * r_hat
         + params["Cl_da"] * da
@@ -139,7 +146,7 @@ def aerodynamic_wrench(
         + params["Cm_de"] * de
     )
     Cn = (
-        params["Cn_beta"] * beta
+        params["Cn_beta"] * beta_eff
         + params["Cn_p"] * p_hat
         - params["Cn_r_damp"] * r_hat
         + params["Cn_da"] * da

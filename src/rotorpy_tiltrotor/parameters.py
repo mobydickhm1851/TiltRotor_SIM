@@ -47,6 +47,10 @@ def default_tiltrotor_params() -> dict:
         "b": 4.20,
         "c": 0.72,
         "alpha_stall": np.deg2rad(16.0),
+        # The lateral/directional derivatives below are a linear small-sideslip
+        # model. Saturate their beta input outside this envelope instead of
+        # extrapolating C_Y/C_l/C_n to +/-90 deg during low-speed crosswind.
+        "beta_linear_limit": np.deg2rad(20.0),
         "wing_aero_start_mps": 2.0,
         "wing_aero_full_mps": 7.0,
         "wing_tilt_start": np.deg2rad(15.0),
