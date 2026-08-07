@@ -54,7 +54,9 @@ The FAA operational PIREP terms Light / Moderate / Severe / Extreme are not fixe
 
 ## Why the comfort guard could still exceed 1.5 m/s^3
 
-v0.4.1 used the passenger-facing jerk target as the commanded acceleration slew-rate limit. Aircraft output is not identical to command because the closed-loop plant contains motor lag, nonlinear rotor thrust, ground-contact release, attitude coupling, nacelle dynamics and aerodynamic response. Therefore a 1.50 m/s^3 command slew limit could still produce a measured kinematic peak around or above 1.50 m/s^3.
+v0.4.1 used the passenger-facing jerk target as the commanded acceleration slew-rate limit. Aircraft output is not identical to command because the closed-loop plant contains motor lag, nonlinear rotor thrust, ground-contact release, attitude coupling, nacelle dynamics and aerodynamic response. Therefore a 1.50 m/s^3 command slew limit can produce a substantially larger measured kinematic jerk.
+
+A v0.4.2 regression run with a preliminary 60% command headroom demonstrated this directly: nominal vertical takeoff still produced about 3.50 m/s^3 measured peak jerk. The test was intentionally kept as an output test instead of weakening the threshold.
 
 ## v0.4.2 jerk-guard correction
 
@@ -62,18 +64,20 @@ The selected dashboard value remains the measured passenger-motion target:
 
 `Measured jerk target = 1.50 m/s^3`.
 
-The controller uses only 60% of that target internally:
+The final controller calibration uses only 20% of that target for the internal acceleration-command slew rate:
 
-j_cmd,max = 0.60 j_target
+j_cmd,max = 0.20 j_target
 
-so the default internal slew limit is 0.90 m/s^3. The remaining 40% is plant-response headroom. Actual kinematic jerk remains the output KPI and is not clipped in the plot. Strong external turbulence can still exceed the passenger target; a command governor cannot physically guarantee ride comfort against arbitrarily large atmospheric disturbances.
+so the default internal slew limit is 0.30 m/s^3. The remaining 80% is explicit plant-response headroom for motor/thrust/lift-off and closed-loop dynamics. Actual kinematic jerk remains the output KPI and is not clipped in the plot.
+
+This governor is designed to keep the *nominal commanded takeoff* near the selected ride target. Strong external turbulence can still make measured jerk exceed the target; a command governor cannot physically guarantee passenger comfort against arbitrary atmospheric disturbances.
 
 ## Validation logic
 
 Regression tests separately verify:
 
 1. the CS-AWO vertical turbulence has the expected RMS scaling and strongly correlated adjacent samples;
-2. nominal vertical takeoff with comfort guard checks the *measured aircraft jerk*, not merely command jerk;
+2. nominal vertical takeoff with comfort guard checks the measured aircraft jerk, not merely command jerk;
 3. the transition/cruise interval remains finite and altitude-stable under the default U=5 m/s continuous-turbulence benchmark;
 4. normal later landing is excluded from the transition-crash metric.
 
