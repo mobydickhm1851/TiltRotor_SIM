@@ -13,7 +13,7 @@ def test_combined_guard_and_repeated_gust_preserves_safety_and_brakes_to_hover()
     sim.controller.command_jerk_headroom = 0.20
 
     # A short cruise leg keeps this regression focused on the reported
-    # cruise->hover behaviour.  The stopping dynamics are unchanged: entry is
+    # cruise->hover behaviour. The stopping dynamics are unchanged: entry is
     # still at the 15 m/s cruise condition.
     mission = GuardAwareAutomaticMission(
         sim.commander,
@@ -41,7 +41,8 @@ def test_combined_guard_and_repeated_gust_preserves_safety_and_brakes_to_hover()
     low_ground_speed_s = None
     returned_hover = False
     max_nominal_command_accel = 0.0
-    max_nominal_command_jerk = 0.0
+    max_non_safety_command_jerk = 0.0
+    reentry_seen = False
 
     while sim.t < 170.0:
         mission.update(sim.t, sim.state)
@@ -67,6 +68,11 @@ def test_combined_guard_and_repeated_gust_preserves_safety_and_brakes_to_hover()
         safety = float(getattr(
             sim.controller, "safety_override_factor", 0.0
         ))
+        reentry = bool(getattr(
+            sim.controller, "comfort_reentry_active", False
+        ))
+        reentry_seen = reentry_seen or reentry
+
         if safety <= 0.05:
             command_accel = float(np.linalg.norm(
                 sim.controller._last_priority_accel_world
@@ -74,11 +80,16 @@ def test_combined_guard_and_repeated_gust_preserves_safety_and_brakes_to_hover()
             command_jerk = float(
                 sim.controller.last_command_jerk_norm_mps3
             )
-            max_nominal_command_accel = max(
-                max_nominal_command_accel, command_accel
-            )
-            max_nominal_command_jerk = max(
-                max_nominal_command_jerk, command_jerk
+            # After a safety override clears, acceleration may still be above
+            # the nominal sphere while it returns at the selected jerk rate.
+            # Outside that explicitly flagged re-entry, the acceleration target
+            # remains a hard 3-D command norm.
+            if not reentry:
+                max_nominal_command_accel = max(
+                    max_nominal_command_accel, command_accel
+                )
+            max_non_safety_command_jerk = max(
+                max_non_safety_command_jerk, command_jerk
             )
 
         if phase == FlightPhase.TRANSITION_TO_HOVER:
@@ -107,6 +118,7 @@ def test_combined_guard_and_repeated_gust_preserves_safety_and_brakes_to_hover()
         "vertical_speed": round(float(sim.state["v"][2]), 3),
         "tilt_deg": round(float(np.rad2deg(sim.state["tilt_angle"])), 2),
         "altitude": round(float(sim.state["x"][2]), 2),
+        "reentry_seen": reentry_seen,
         "target_xy": [
             round(float(sim.commander.setpoint.hold_x_m), 2),
             round(float(sim.commander.setpoint.hold_y_m), 2),
@@ -120,13 +132,14 @@ def test_combined_guard_and_repeated_gust_preserves_safety_and_brakes_to_hover()
     assert min_operational_altitude > 25.0, snapshot
 
     assert max_nominal_command_accel <= 0.5001, snapshot
-    assert max_nominal_command_jerk <= 0.3001, snapshot
+    assert max_non_safety_command_jerk <= 0.3001, snapshot
 
     assert back_start_s is not None, snapshot
     assert low_ground_speed_s is not None, snapshot
     braking_time = low_ground_speed_s - back_start_s
     # 15 m/s at a strict 0.5 m/s^2 resultant comfort target has an ideal lower
-    # bound of 30 s.  Allow gust/altitude/lateral-control margin, but reject the
+    # bound of 30 s to reach zero. Reaching <2 m/s has a lower ideal bound of
+    # about 26 s. Allow gust/altitude/lateral-control margin, but reject the
     # unnecessarily weak braking seen in the reported trace.
     assert braking_time < 45.0, {
         **snapshot,
