@@ -246,7 +246,7 @@ def build_dashboard(doc, simulation=None):
         },
     )
 
-    def apply_compact_semantics(attr=None, old=None, new=None) -> None:
+    def apply_compact_semantics(attr, old, new) -> None:
         del attr, old, new
         is_continuous = wind_mode.value == v042.CS_AWO_LABEL
         if is_continuous:
@@ -273,7 +273,7 @@ def build_dashboard(doc, simulation=None):
     # v0.4.2 has its own scenario callbacks; register this one last so the final
     # visible titles always use the compact, non-overlapping form.
     wind_mode.on_change("value", apply_compact_semantics)
-    apply_compact_semantics()
+    apply_compact_semantics(None, None, None)
 
     root = doc.roots[0]
     if hasattr(root, "children"):
