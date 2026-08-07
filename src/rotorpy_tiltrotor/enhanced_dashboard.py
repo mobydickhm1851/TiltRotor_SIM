@@ -1,13 +1,17 @@
-"""Enhanced v0.4.1 dashboard for urban disturbance and ride-comfort studies.
+"""Enhanced v0.4.2 dashboard for urban disturbance and ride-comfort studies.
 
-This module deliberately wraps the established dashboard instead of duplicating
-its flight-command and plotting implementation.  It adds:
+This module wraps the established dashboard and adds:
 
-* repeated gusts and continuous turbulence to the wind selector;
-* scenario-relative timing (delay after enable);
-* kinematic acceleration/jerk measurement suitable for ground/takeoff plots;
-* a command-level acceleration + jerk guard;
-* ISO-2631-style Wd/Wk weighted-vibration plots and source-backed defaults.
+* scenario-relative wind timing;
+* repeated gusts plus a FAR/CS 25.341-style continuous-turbulence benchmark;
+* kinematic acceleration/jerk measurement for ground/takeoff plots;
+* acceleration + jerk command guarding with plant-response headroom;
+* ISO-2631-style Wd/Wk weighted-vibration plots.
+
+The continuous-turbulence benchmark is intentionally one-dimensional and uses
+an approximate finite Fourier realization of the normalized Von Karman spectrum
+with L=2500 ft, matching the core FAR/CS 25.341 assumption.  It is a controller-
+test benchmark, not a certification analysis and not a CFD-resolved urban flow.
 """
 from __future__ import annotations
 
@@ -36,51 +40,118 @@ EXTRA_SOURCE_FIELDS = [
     "comfort_iso_index",
 ]
 
+FAR_CS_TURBULENCE_SCALE_M = 762.0  # 2500 ft
+FAR_CS_REFERENCE_AIRSPEED_MPS = 15.0
+VON_KARMAN_COMPONENTS = 256
+COMMAND_JERK_HEADROOM = 0.60
+TURBULENCE_FADE_IN_S = 3.0
+
 
 class FixedUrbanWindModel(UrbanWindModel):
-    """Keep continuous-turbulence states in the local wind-axis frame."""
+    """Wind model with a FAR/CS 25.341-style continuous-turbulence option.
+
+    Repeated gusts and urban wake retain the reduced-order models inherited from
+    ``UrbanWindModel``.  Only ``continuous_turbulence`` is replaced here.
+
+    The regulation describes a one-dimensional Gaussian random atmosphere with
+    a normalized Von Karman PSD and turbulence scale length L=2500 ft.  The
+    dashboard uses a deterministic finite Fourier realization at a 15 m/s
+    reference speed and normalizes it to the user-selected RMS sigma.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._vk_key = None
+        self._vk_omega = np.zeros(0)
+        self._vk_amplitude = np.zeros(0)
+        self._vk_phase = np.zeros(0)
+
+    def reset(self) -> None:
+        super().reset()
+        self._vk_key = None
+        self._vk_omega = np.zeros(0)
+        self._vk_amplitude = np.zeros(0)
+        self._vk_phase = np.zeros(0)
+
+    @staticmethod
+    def _smoothstep01(value: float) -> float:
+        u = float(np.clip(value, 0.0, 1.0))
+        return u * u * (3.0 - 2.0 * u)
+
+    def _ensure_von_karman_basis(self, cfg) -> None:
+        key = (int(cfg.random_seed), FAR_CS_REFERENCE_AIRSPEED_MPS)
+        if key == self._vk_key:
+            return
+
+        # Temporal frequencies are mapped to the regulation's spatial reduced
+        # frequency Omega = omega / V.  The band is deliberately concentrated
+        # on rigid-body flight-dynamics frequencies; this simulator is not a
+        # structural-vibration certification model.
+        frequency_hz = np.logspace(
+            np.log10(0.002), np.log10(5.0), VON_KARMAN_COMPONENTS
+        )
+        omega = 2.0 * np.pi * frequency_hz
+        reduced = omega / FAR_CS_REFERENCE_AIRSPEED_MPS
+        x = 1.339 * FAR_CS_TURBULENCE_SCALE_M * reduced
+        phi_spatial = (
+            FAR_CS_TURBULENCE_SCALE_M
+            / np.pi
+            * (1.0 + (8.0 / 3.0) * x * x)
+            / np.power(1.0 + x * x, 11.0 / 6.0)
+        )
+        # Convert the spatial spectrum to a temporal spectrum by dOmega=domega/V.
+        phi_temporal = phi_spatial / FAR_CS_REFERENCE_AIRSPEED_MPS
+        domega = np.gradient(omega)
+        amplitude = np.sqrt(np.maximum(0.0, 2.0 * phi_temporal * domega))
+
+        # Finite frequency limits truncate the theoretical spectrum. Normalize
+        # the synthesized process so the user input has the unambiguous meaning
+        # of RMS turbulence velocity sigma.
+        expected_rms = float(np.sqrt(0.5 * np.sum(amplitude * amplitude)))
+        if expected_rms > 1e-12:
+            amplitude /= expected_rms
+
+        rng = np.random.default_rng(int(cfg.random_seed))
+        self._vk_omega = omega
+        self._vk_amplitude = amplitude
+        self._vk_phase = rng.uniform(0.0, 2.0 * np.pi, len(omega))
+        self._vk_key = key
 
     def _continuous_turbulence(self, t, elapsed, cfg):
+        del t
         if elapsed < cfg.start_time_s:
-            self._last_turbulence_time = float(t)
-            self._turbulence_state[:] = 0.0
             return np.zeros(3), False
 
-        dt = (
-            0.0
-            if self._last_turbulence_time is None
-            else max(0.0, float(t) - self._last_turbulence_time)
+        self._ensure_von_karman_basis(cfg)
+        local_time = float(elapsed - cfg.start_time_s)
+        unit_value = float(np.sum(
+            self._vk_amplitude
+            * np.cos(self._vk_omega * local_time + self._vk_phase)
+        ))
+        fade = self._smoothstep01(local_time / TURBULENCE_FADE_IN_S)
+        vertical_velocity = (
+            float(cfg.disturbance_amplitude_mps) * fade * unit_value
         )
-        self._last_turbulence_time = float(t)
-        along, cross = self._direction_vectors(cfg.disturbance_direction_deg)
 
-        if dt > 0.0:
-            tau = max(0.18, 1.0 / (2.0 * np.pi * cfg.wake_frequency_hz))
-            axis_tau = np.array([1.0, 0.75, 0.55]) * tau
-            alpha = np.exp(-dt / axis_tau)
-            sigma = cfg.disturbance_amplitude_mps * np.array([0.65, 0.85, 0.35])
-            innovation = self._rng.normal(size=3)
-            self._turbulence_state = (
-                alpha * self._turbulence_state
-                + sigma
-                * np.sqrt(np.maximum(0.0, 1.0 - alpha * alpha))
-                * innovation
-            )
-
-        local = self._turbulence_state
-        disturbance = (
-            local[0] * along
-            + local[1] * cross
-            + local[2] * np.array([0.0, 0.0, 1.0])
-        )
-        return disturbance, True
+        # FAR/CS 25.341 evaluates vertical and lateral continuous turbulence;
+        # the default benchmark here uses the vertical case, which is the most
+        # directly relevant to altitude/lift robustness during transition.
+        return np.array([0.0, 0.0, vertical_velocity]), True
 
 
 class ComfortAwareController(TiltrotorController):
-    """Base controller with global acceleration and jerk command limiting."""
+    """Base controller with global acceleration and jerk command limiting.
+
+    ``max_command_jerk_mps3`` remains the passenger-facing measured jerk target.
+    Internally only 60% is used for command slew, leaving headroom for motor lag,
+    tilt dynamics and closed-loop plant response.  The measured aircraft jerk is
+    still monitored independently and can exceed the command rate under strong
+    external disturbances.
+    """
 
     def __init__(self, *args, **kwargs):
         self.max_command_jerk_mps3: float | None = None
+        self.command_jerk_headroom = COMMAND_JERK_HEADROOM
         super().__init__(*args, **kwargs)
 
     def reset(self) -> None:
@@ -89,19 +160,20 @@ class ComfortAwareController(TiltrotorController):
 
     def _desired_velocity_and_acceleration(self, t, state):
         v_ref, a_cmd = super()._desired_velocity_and_acceleration(t, state)
-        # v0.4.0 only applied max_accel inside forward-flight code. Apply it
-        # here as a global guard so vertical takeoff/landing are covered too.
         a_cmd = clamp_norm(np.asarray(a_cmd, dtype=float), float(self.max_accel))
 
-        jerk_limit = self.max_command_jerk_mps3
-        if jerk_limit is not None and jerk_limit > 0.0:
+        jerk_target = self.max_command_jerk_mps3
+        if jerk_target is not None and jerk_target > 0.0:
+            internal_limit = (
+                float(jerk_target) * float(self.command_jerk_headroom)
+            )
             if self._control_dt <= 0.0:
                 a_cmd = self._last_limited_accel_world.copy()
             else:
                 delta = a_cmd - self._last_limited_accel_world
                 delta = clamp_norm(
                     delta,
-                    float(jerk_limit) * self._control_dt,
+                    internal_limit * self._control_dt,
                 )
                 a_cmd = self._last_limited_accel_world + delta
                 a_cmd = clamp_norm(a_cmd, float(self.max_accel))
@@ -111,14 +183,7 @@ class ComfortAwareController(TiltrotorController):
 
 
 class ComfortAwareSimulation(TiltrotorSimulation):
-    """Use kinematic acceleration/jerk after constraints are applied.
-
-    The original diagnostics differentiated the unconstrained force-model
-    acceleration. On the ground that value can contain -g even though the
-    ground constraint keeps velocity at zero. Differentiating it at lift-off
-    creates an artificial jerk spike. Here acceleration is calculated from
-    the actual integrated velocity change, so ground contact is respected.
-    """
+    """Use kinematic acceleration/jerk after ground constraints are applied."""
 
     def reset(self, state=None) -> None:
         super().reset(state)
@@ -132,9 +197,7 @@ class ComfortAwareSimulation(TiltrotorSimulation):
         if self._kinematic_previous_accel is None:
             jerk = np.zeros(3)
         else:
-            jerk = (
-                accel - self._kinematic_previous_accel
-            ) / self.dt
+            jerk = (accel - self._kinematic_previous_accel) / self.dt
         self._kinematic_previous_accel = accel.copy()
 
         self.vehicle.last_diagnostics["accel_world"] = accel
@@ -168,16 +231,14 @@ def _new_simulation() -> ComfortAwareSimulation:
 
 
 def build_dashboard(doc, simulation=None):
-    """Build v0.4.1 dashboard while preserving the established flight UI."""
-    # The old builder hard-codes the legacy value "Discrete gust" during
-    # construction, so keep that key temporarily and then replace the options.
+    """Build v0.4.2 dashboard while preserving the established flight UI."""
     base_dashboard.WIND_MODE_LABELS.clear()
     base_dashboard.WIND_MODE_LABELS.update({
         "Steady wind": "steady",
         "Discrete gust": "discrete_gust",
         "Single discrete gust": "discrete_gust",
         "Repeated gusts": "repeated_gusts",
-        "Continuous turbulence": "continuous_turbulence",
+        "Continuous turbulence (FAR/CS 25.341-style)": "continuous_turbulence",
         "Wind shear": "wind_shear",
         "Urban wake proxy": "urban_wake",
     })
@@ -194,7 +255,7 @@ def build_dashboard(doc, simulation=None):
         "Steady wind",
         "Single discrete gust",
         "Repeated gusts",
-        "Continuous turbulence",
+        "Continuous turbulence (FAR/CS 25.341-style)",
         "Wind shear",
         "Urban wake proxy",
     ]
@@ -207,14 +268,17 @@ def build_dashboard(doc, simulation=None):
     duration_input.title = "Single-gust / wake duration [s]"
     duration_input.value = 3.0
     frequency_input = _find_one(doc, NumericInput, title="Wake frequency [Hz]")
-    frequency_input.title = "Repeat / turbulence frequency [Hz]"
+    frequency_input.title = "Repeat / wake frequency [Hz]"
     frequency_input.value = 0.25
+    amplitude_input = _find_one(
+        doc, NumericInput, title="Disturbance amplitude [m/s]"
+    )
 
     accel_input = _find_one(doc, NumericInput, title="Acceleration limit [m/s²]")
     accel_input.title = "Transient accel target [m/s²] (NASA-informed)"
     accel_input.value = 0.50
     jerk_input = _find_one(doc, NumericInput, title="Jerk limit [m/s³]")
-    jerk_input.title = "Transient jerk target [m/s³] (NASA-informed)"
+    jerk_input.title = "Measured jerk target [m/s³] (NASA-informed)"
     jerk_input.value = 1.50
     rate_input = _find_one(doc, NumericInput, title="Angular-rate limit [deg/s]")
     rate_input.title = "Angular-rate study threshold [deg/s]"
@@ -233,11 +297,34 @@ def build_dashboard(doc, simulation=None):
         del attr, old, new
         set_jerk_guard_value()
 
+    def update_wind_control_semantics(attr, old, new) -> None:
+        del attr, old, new
+        is_continuous = wind_mode.value.startswith("Continuous turbulence")
+        if is_continuous:
+            amplitude_input.title = "Turbulence RMS sigma [m/s]"
+            # v0.4.1 used 5 m/s as a generic disturbance amplitude. For a
+            # continuous Gaussian process that value behaved like a very severe
+            # standard deviation. Use a transparent 1 m/s operational test
+            # default instead; the user may still choose another sigma.
+            if float(amplitude_input.value or 0.0) >= 4.5:
+                amplitude_input.value = 1.0
+            frequency_input.title = "Repeat / wake frequency [Hz] (ignored here)"
+            frequency_input.disabled = True
+            duration_input.title = "Continuous turbulence duration: until OFF"
+            duration_input.disabled = True
+        else:
+            amplitude_input.title = "Disturbance amplitude [m/s]"
+            frequency_input.title = "Repeat / wake frequency [Hz]"
+            frequency_input.disabled = False
+            duration_input.title = "Single-gust / wake duration [s]"
+            duration_input.disabled = False
+
     guard.on_change("active", apply_jerk_guard)
     jerk_input.on_change("value", apply_jerk_guard)
+    wind_mode.on_change("value", update_wind_control_semantics)
     set_jerk_guard_value()
+    update_wind_control_semantics(None, None, None)
 
-    # Locate the primary stream after the base dashboard added all fields.
     stream_source = None
     for candidate in doc.select({"type": ColumnDataSource}):
         if "comfort_iso_weighted_rms_mps2" in candidate.data:
@@ -270,16 +357,17 @@ def build_dashboard(doc, simulation=None):
 
     explanation = Div(
         text=(
-            "<h3>Comfort interpretation (v0.4.1)</h3>"
-            "<b>Monitor ON</b> records motion only; it does not change control. "
-            "<b>Comfort accel + jerk guard ON</b> clamps the controller's "
-            "acceleration command and its rate of change. The default transient "
-            "targets (0.50 m/s² acceleration, 1.50 m/s³ jerk) are conservative "
-            "engineering targets informed by NASA UAM sudden-heave studies, not "
-            "FAA/EASA certification limits. The separate 0.315 m/s² line is an "
-            "ISO 2631-1 whole-body-vibration comfort-band boundary after Wd/Wk "
-            "frequency weighting. This 100-Hz simulator implementation is an "
-            "ISO-style low-frequency approximation, not ISO 8041 compliance."
+            "<h3>v0.4.2 interpretation</h3>"
+            "<b>Comfort guard:</b> the 1.50 m/s³ value is the measured passenger-"
+            "motion target. The internal command slew limit uses 60% of that "
+            "value to leave headroom for motor/tilt/plant dynamics; measured jerk "
+            "remains the KPI. <b>Continuous turbulence:</b> this option is now a "
+            "one-dimensional FAR/CS 25.341-style Gaussian Von Karman benchmark "
+            "with L=2500 ft (762 m). The amplitude field is RMS turbulence sigma, "
+            "not peak gust speed. The default sigma=1 m/s is an engineering test "
+            "level, not a certification intensity. FAR/CS limit turbulence "
+            "intensities are structural-load design values and should not be "
+            "misread as everyday urban operating wind."
         ),
         sizing_mode="stretch_width",
     )
@@ -288,7 +376,6 @@ def build_dashboard(doc, simulation=None):
     if isinstance(root, column().__class__):
         root.children.extend([explanation, iso_plot])
     else:
-        # Bokeh roots are normally the Column built by the base dashboard.
         doc.add_root(column(explanation, iso_plot, sizing_mode="stretch_width"))
 
     def keep_labels_current():
