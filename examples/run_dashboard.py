@@ -7,7 +7,7 @@ import webbrowser
 from bokeh.server.server import Server
 from tornado.ioloop import IOLoop
 
-from rotorpy_tiltrotor.v045_final_dashboard import build_dashboard
+from rotorpy_tiltrotor.v046_dashboard import build_dashboard
 
 
 def app(doc):
