@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rotorpy-tiltrotor"
-version = "0.4.0"
+version = "0.4.1"
 description = "RotorPy-compatible reduced-order quad tiltrotor with flight phases and a live Bokeh dashboard"
 readme = "README.md"
 requires-python = ">=3.10"
