@@ -2,11 +2,12 @@ import numpy as np
 from bokeh.document import Document
 from bokeh.models import NumericInput, Select
 
-from rotorpy_tiltrotor.commands import AutomaticMission
+from rotorpy_tiltrotor.commands import AutomaticMission, FlightPhase
 from rotorpy_tiltrotor.enhanced_dashboard import _new_simulation
 from rotorpy_tiltrotor.scenarios import WindScenarioConfig
 from rotorpy_tiltrotor.v042_dashboard import (
     CS_AWO_LABEL,
+    CS_AWO_MAX_FREQUENCY_HZ,
     CS_AWO_SIGMA_RATIO,
     CS_AWO_TURBULENCE_SCALE_M,
     LowAltitudeCSAWOWindModel,
@@ -43,6 +44,7 @@ def test_cs_awo_continuous_turbulence_is_vertical_smooth_and_scaled():
     assert max_wind_accel < 3.0
     assert np.isclose(CS_AWO_TURBULENCE_SCALE_M, 183.0)
     assert np.isclose(CS_AWO_SIGMA_RATIO, 0.15)
+    assert CS_AWO_MAX_FREQUENCY_HZ <= 0.5
 
 
 def test_comfort_guard_keeps_nominal_takeoff_measured_jerk_near_target():
@@ -51,9 +53,9 @@ def test_comfort_guard_keeps_nominal_takeoff_measured_jerk_near_target():
     sim.controller.max_command_jerk_mps3 = 1.50
     sim.commander.vertical_takeoff(
         sim.t,
-        altitude_m=30.0,
-        hold_x_m=0.0,
-        hold_y_m=0.0,
+        30.0,
+        float(sim.state["x"][0]),
+        float(sim.state["x"][1]),
     )
 
     peak_jerk = 0.0
@@ -68,7 +70,7 @@ def test_comfort_guard_keeps_nominal_takeoff_measured_jerk_near_target():
     assert sim.state["x"][2] > 1.0
 
 
-def test_default_cs_awo_turbulence_does_not_crash_transition():
+def test_default_cs_awo_turbulence_does_not_crash_forward_transition():
     sim = _new_simulation()
     mission = AutomaticMission(
         sim.commander,
@@ -84,27 +86,38 @@ def test_default_cs_awo_turbulence_does_not_crash_transition():
         random_seed=21,
     ))
 
-    min_altitude_after_40 = 1e9
-    max_body_rate_deg_s = 0.0
-    for _ in range(int(115.0 / sim.dt)):
+    min_forward_altitude = np.inf
+    max_forward_body_rate_deg_s = 0.0
+    saw_forward_flight = False
+    for _ in range(int(120.0 / sim.dt)):
         mission.update(sim.t, sim.state)
+        phase = sim.commander.setpoint.phase
         sample_wind = wind.sample(sim.t, sim.state)
         sim.step(sample_wind.vector_mps)
+
         assert np.all(np.isfinite(sim.state["x"]))
         assert np.all(np.isfinite(sim.state["v"]))
         assert np.all(np.isfinite(sim.state["q"]))
-        if sim.t > 40.0:
-            min_altitude_after_40 = min(
-                min_altitude_after_40,
+
+        if phase in (
+            FlightPhase.TRANSITION_TO_CRUISE,
+            FlightPhase.CRUISE,
+        ):
+            saw_forward_flight = True
+            min_forward_altitude = min(
+                min_forward_altitude,
                 float(sim.state["x"][2]),
             )
-            max_body_rate_deg_s = max(
-                max_body_rate_deg_s,
+            max_forward_body_rate_deg_s = max(
+                max_forward_body_rate_deg_s,
                 float(np.linalg.norm(sim.state["w"])) * 180.0 / np.pi,
             )
+        elif saw_forward_flight and phase == FlightPhase.TRANSITION_TO_HOVER:
+            break
 
-    assert min_altitude_after_40 > 18.0
-    assert max_body_rate_deg_s < 90.0
+    assert saw_forward_flight
+    assert min_forward_altitude > 20.0
+    assert max_forward_body_rate_deg_s < 60.0
 
 
 def test_dashboard_labels_low_alt_turbulence_as_reference_mean_wind():
