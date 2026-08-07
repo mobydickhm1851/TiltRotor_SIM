@@ -11,8 +11,10 @@ from rotorpy_tiltrotor.v042_dashboard import (
     CS_AWO_HORIZONTAL_SIGMA_RATIO,
     CS_AWO_MAX_FREQUENCY_HZ,
     CS_AWO_VERTICAL_SIGMA_RATIO,
+    V042_COMMAND_JERK_HEADROOM,
     LowAltitudeCSAWOWindModel,
     build_dashboard,
+    configure_v042_comfort_governor,
     cs_awo_vertical_scale_m,
 )
 
@@ -43,15 +45,11 @@ def test_cs_awo_vertical_turbulence_is_smooth_and_scaled_at_30m():
     steady = values[int(10.0 / dt):, 2]
     measured_sigma = np.std(steady)
     assert 0.45 * expected_sigma_w < measured_sigma < 1.55 * expected_sigma_w
-    # Adjacent 100-Hz samples must be strongly correlated rather than resemble
-    # the v0.4.1 short-correlation multi-axis noise.
     assert np.max(np.abs(np.diff(steady))) < 0.15
     assert np.corrcoef(steady[:-1], steady[1:])[0, 1] > 0.98
 
     assert np.isclose(CS_AWO_VERTICAL_SIGMA_RATIO, 0.09)
     assert np.isclose(cs_awo_vertical_scale_m(30.0), 15.0)
-    # Keep the horizontal values explicit so future code does not accidentally
-    # reuse them for the vertical transition benchmark.
     assert np.isclose(CS_AWO_HORIZONTAL_SIGMA_RATIO, 0.15)
     assert np.isclose(CS_AWO_HORIZONTAL_SCALE_M, 183.0)
     assert CS_AWO_MAX_FREQUENCY_HZ <= 1.0
@@ -59,6 +57,11 @@ def test_cs_awo_vertical_turbulence_is_smooth_and_scaled_at_30m():
 
 def test_comfort_guard_keeps_nominal_takeoff_measured_jerk_near_target():
     sim = _new_simulation()
+    configure_v042_comfort_governor(sim)
+    assert np.isclose(
+        sim.controller.command_jerk_headroom,
+        V042_COMMAND_JERK_HEADROOM,
+    )
     sim.controller.max_accel = 0.50
     sim.controller.max_command_jerk_mps3 = 1.50
     sim.commander.vertical_takeoff(
@@ -133,7 +136,11 @@ def test_default_cs_awo_turbulence_does_not_crash_forward_transition():
 
 def test_dashboard_labels_low_alt_vertical_turbulence_semantics():
     doc = Document()
-    build_dashboard(doc)
+    sim = build_dashboard(doc)
+    assert np.isclose(
+        sim.controller.command_jerk_headroom,
+        V042_COMMAND_JERK_HEADROOM,
+    )
     selector = next(
         item for item in doc.select({"type": Select})
         if item.title == "Wind scenario"
