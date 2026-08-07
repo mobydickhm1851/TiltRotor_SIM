@@ -8,39 +8,45 @@ RotorPy-compatible reduced-order quad tiltrotor simulation with:
 - vertical takeoff/landing, hover, transition, cruise, and back-transition modes
 - cascaded position/velocity PID and quaternion attitude PID/PD control
 - automatic mission runner and live Bokeh dashboard
-- urban wind/gust scenarios and passenger-comfort proxy monitoring
+- urban wind/gust/turbulence scenarios and passenger-comfort monitoring
 
 > This is a transparent reduced-order research prototype. It is not a certified or flight-validated aircraft model.
 
-## v0.4 urban wind and passenger comfort
-
-The dashboard now provides two experimental toggles.
+## v0.4.1 gust timing, repeated disturbances and comfort metrics
 
 ### Urban wind / gust
 
-Available scenarios:
+The dashboard now distinguishes six disturbance cases:
 
 - steady three-dimensional wind
-- smooth finite-duration discrete gust
+- **single discrete gust** for one standardized finite encounter
+- **repeated gusts** with recurring, non-identical events
+- **continuous turbulence** using a seeded correlated stochastic proxy
 - altitude-dependent wind shear
 - deterministic multi-frequency urban-wake proxy
 
-Controls include base x/y/z wind, disturbance amplitude and direction, start time, duration, shear gradient and wake frequency. The dashboard plots the three wind components, total wind magnitude and disturbance-only magnitude.
+The old `Start time` control is now shown as **Delay after scenario enable [s]**. This fixes the v0.4.0 behavior where enabling a gust after its absolute simulation-time window had already passed showed only the base wind.
+
+Repeated-gust and continuous-turbulence modes are intended for urban disturbance-rejection experiments. They are reduced-order proxies, not certified Dryden/Von-Karman turbulence or building-resolved CFD.
 
 ### Passenger comfort
 
-The comfort monitor calculates:
+The dashboard now separates two types of KPI:
 
-- instantaneous and rolling-RMS acceleration magnitude
-- instantaneous and rolling-RMS jerk magnitude
-- instantaneous and rolling-RMS body angular-rate magnitude
-- peak values since reset
-- normalized comfort index
-- total time above the selected limits
+1. **Transient UAM maneuver metrics**: acceleration, jerk and body-rate diagnostics, with NASA-informed default engineering targets of 0.50 m/s² and 1.50 m/s³ for acceleration and jerk. These are not FAA/EASA certification limits.
+2. **Sustained vibration metric**: ISO 2631-style Wd/Wk frequency-weighted rolling RMS acceleration, compared with the 0.315 m/s² `not uncomfortable` comfort-band boundary.
 
-The optional **Comfort accel guard** limits the controller's maximum commanded acceleration and uses the selected acceleration limit when planning a manual back-transition stopping point. Jerk and angular-rate limits are monitoring thresholds, not hard constraints.
+Acceleration and jerk are now calculated kinematically from the actual integrated velocity after the ground constraint is applied. This removes the artificial takeoff jerk spike caused by differentiating an unconstrained force-model acceleration while the aircraft was still constrained to the ground.
 
-See [`URBAN_WIND_COMFORT_REPORT.md`](URBAN_WIND_COMFORT_REPORT.md) for formulas, suggested A/B experiments and limitations.
+The optional **Comfort accel + jerk guard** now:
+
+- applies the selected acceleration limit in every flight phase, including vertical takeoff/landing;
+- slew-limits the commanded acceleration using the selected jerk target;
+- still leaves measured vehicle acceleration/jerk visible as output KPIs, because gusts, actuator dynamics and phase transitions can make actual motion differ from the command.
+
+The ISO filter is an engineering implementation using the ISO Wd/Wk transfer-function structure and bilinear discretization. The simulation runs at 100 Hz, so it is explicitly labelled **ISO 2631-style** rather than ISO 8041 compliant.
+
+See [`V041_GUST_COMFORT_REPORT.md`](V041_GUST_COMFORT_REPORT.md) for rationale, formulas and literature sources. The original v0.4 report remains in [`URBAN_WIND_COMFORT_REPORT.md`](URBAN_WIND_COMFORT_REPORT.md).
 
 ## v0.3.2 manual transition-to-hover correction
 
@@ -86,10 +92,11 @@ The **Run automatic mission** button uses the same `TiltrotorSimulation`, contro
 
 ## Suggested wind/comfort comparison
 
-1. Reset and run the automatic mission with **Urban wind / gust OFF** and **Comfort accel guard OFF**.
-2. Reset, enable a wind scenario, and repeat with the same mission settings.
-3. Reset and repeat the identical disturbed mission with **Comfort accel guard ON**.
-4. Compare cross-track error, altitude error, roll/pitch, acceleration, jerk, angular rate, comfort index and exceedance time.
+1. Reset and run the automatic mission with **Urban wind / gust OFF** and **Comfort accel + jerk guard OFF**.
+2. Reset, enable **Repeated gusts** or **Continuous turbulence**, and repeat with the same mission settings.
+3. Reset and repeat the identical disturbed mission with **Comfort accel + jerk guard ON**.
+4. Compare cross-track error, altitude error, roll/pitch, transient acceleration/jerk, ISO-style weighted RMS acceleration, body rate, comfort indices and exceedance time.
+5. Use **Single discrete gust** when a repeatable one-event disturbance-response test is desired.
 
 ## Run the automatic mission
 
@@ -129,17 +136,18 @@ Forward port `8050` from the Codespaces Ports panel.
 
 ```text
 src/rotorpy_tiltrotor/
-├── parameters.py     aircraft and actuator parameters
-├── aerodynamics.py   reduced-order blended wing/tail wrench
-├── allocator.py      rotor thrust/moment allocation
-├── commands.py       flight phases and mission state machine
-├── controller.py     cascaded PID, route guidance and authority blending
-├── scenarios.py      wind/gust generators and comfort metrics
-├── vehicle.py        nonlinear dynamics and actuator states
-├── simulator.py      batch/real-time simulation and logging
-└── dashboard.py      live Bokeh UI
+├── parameters.py          aircraft and actuator parameters
+├── aerodynamics.py        reduced-order blended wing/tail wrench
+├── allocator.py           rotor thrust/moment allocation
+├── commands.py            flight phases and mission state machine
+├── controller.py          cascaded PID, route guidance and authority blending
+├── scenarios.py           wind/gust/turbulence and comfort metrics
+├── vehicle.py             nonlinear dynamics and actuator states
+├── simulator.py           batch/real-time simulation and logging
+├── dashboard.py           established live Bokeh UI
+└── enhanced_dashboard.py  v0.4.1 disturbance/comfort wrapper
 ```
 
 ## Current limitations
 
-Not yet included: dynamic inflow, blade flapping, rotor-wing interference, post-stall lookup tables, ground effect, building-resolved CFD wakes, obstacle avoidance, sensor fusion, certified acoustic prediction, ISO 2631 processing, fault-tolerant control, or flight-test validation.
+Not yet included: dynamic inflow, blade flapping, rotor-wing interference, post-stall lookup tables, ground effect, building-resolved CFD wakes, obstacle avoidance, sensor fusion, certified acoustic prediction, ISO 8041-compliant vibration instrumentation, fault-tolerant control, or flight-test validation.
