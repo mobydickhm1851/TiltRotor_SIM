@@ -1,21 +1,21 @@
 """v0.4.2 operational dashboard corrections.
 
-The previous v0.4.2 branch prototype used FAR/CS 25.341's 2500-ft
-continuous-turbulence scale directly.  For this project's low-altitude urban
-transition demonstration, the default operational benchmark is instead based
-on the EASA CS-AWO low-altitude turbulence model:
+For this project's low-altitude urban transition demonstration, the default
+continuous-turbulence benchmark is based on the EASA CS-AWO low-altitude model:
 
 * Gaussian process;
 * Von Karman-type spectrum;
 * scale length L = 183 m (600 ft);
-* RMS turbulence intensity sigma = 0.15 U, where U is a reference mean wind.
+* RMS turbulence intensity sigma = 0.15 U, where U is reference mean wind.
 
-This remains an engineering simulation benchmark, not certification evidence.
+The finite synthesis is restricted to 0.005--0.5 Hz because the current vehicle
+is a reduced-order rigid-body model without structural vibration modes.  The
+underlying Von Karman shape and CS-AWO scale/intensity assumptions are retained,
+but this is an engineering controller benchmark, not certification evidence.
 """
 from __future__ import annotations
 
 import numpy as np
-from bokeh.layouts import column
 from bokeh.models import Div, NumericInput, Select
 
 from . import dashboard as base_dashboard
@@ -26,6 +26,8 @@ CS_AWO_TURBULENCE_SCALE_M = 183.0
 CS_AWO_SIGMA_RATIO = 0.15
 CS_AWO_REFERENCE_AIRSPEED_MPS = 15.0
 CS_AWO_COMPONENTS = 256
+CS_AWO_MIN_FREQUENCY_HZ = 0.005
+CS_AWO_MAX_FREQUENCY_HZ = 0.5
 CS_AWO_FADE_IN_S = 3.0
 CS_AWO_LABEL = "Continuous turbulence (CS-AWO low-altitude style)"
 
@@ -34,9 +36,9 @@ class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
     """One-dimensional vertical CS-AWO-style low-altitude turbulence.
 
     The generic dashboard disturbance input is interpreted as reference mean
-    wind U for this mode.  The turbulence RMS is then sigma=0.15 U.  If a
-    larger horizontal base-wind magnitude is selected, that magnitude is used
-    as U so turbulence intensity is not understated relative to the mean wind.
+    wind U for this mode. The turbulence RMS is sigma=0.15 U. If a larger
+    horizontal base-wind magnitude is selected, that magnitude is used as U so
+    turbulence intensity is not understated relative to mean wind.
     """
 
     def __init__(self, *args, **kwargs):
@@ -54,12 +56,23 @@ class LowAltitudeCSAWOWindModel(enhanced.FixedUrbanWindModel):
         self._awo_phase = np.zeros(0)
 
     def _ensure_awo_basis(self, cfg) -> None:
-        key = (int(cfg.random_seed), CS_AWO_REFERENCE_AIRSPEED_MPS)
+        key = (
+            int(cfg.random_seed),
+            CS_AWO_REFERENCE_AIRSPEED_MPS,
+            CS_AWO_MIN_FREQUENCY_HZ,
+            CS_AWO_MAX_FREQUENCY_HZ,
+        )
         if key == self._awo_key:
             return
 
+        # At V=15 m/s and L=183 m, the characteristic rigid-body turbulence
+        # frequency is O(V/L) ~ 0.08 Hz. The 0.5-Hz upper bound preserves the
+        # relevant low-frequency tail while avoiding artificial structural-band
+        # content that this 6-DOF model cannot represent faithfully.
         frequency_hz = np.logspace(
-            np.log10(0.005), np.log10(5.0), CS_AWO_COMPONENTS
+            np.log10(CS_AWO_MIN_FREQUENCY_HZ),
+            np.log10(CS_AWO_MAX_FREQUENCY_HZ),
+            CS_AWO_COMPONENTS,
         )
         omega = 2.0 * np.pi * frequency_hz
         reduced = omega / CS_AWO_REFERENCE_AIRSPEED_MPS
@@ -117,8 +130,6 @@ def _find(doc, model_type, title=None):
 
 def build_dashboard(doc, simulation=None):
     """Build the v0.4.2 low-altitude operational dashboard."""
-    # enhanced.build_dashboard resolves this class from its module global when
-    # it patches the base dashboard, so replace it before construction.
     enhanced.FixedUrbanWindModel = LowAltitudeCSAWOWindModel
     sim = enhanced.build_dashboard(doc, simulation=simulation)
 
@@ -143,8 +154,6 @@ def build_dashboard(doc, simulation=None):
         del attr, old, new
         if wind_mode.value == CS_AWO_LABEL:
             amplitude.title = "Reference mean wind U [m/s] (sigma = 0.15 U)"
-            # The enhanced v0.4.2 prototype changed 5 -> 1 when entering the
-            # old continuous mode. Restore a meaningful low-alt reference wind.
             if float(amplitude.value or 0.0) <= 1.1:
                 amplitude.value = 5.0
         elif amplitude.title.startswith("Reference mean wind"):
@@ -152,7 +161,6 @@ def build_dashboard(doc, simulation=None):
 
     wind_mode.on_change("value", set_low_alt_semantics)
 
-    # Replace the explanatory block from the intermediate FAR/CS prototype.
     for div in doc.select({"type": Div}):
         if "v0.4.2 interpretation" in str(div.text):
             div.text = (
@@ -161,12 +169,11 @@ def build_dashboard(doc, simulation=None):
                 "motion target; internal command slew uses 60% headroom to "
                 "account for plant dynamics. <b>Continuous turbulence:</b> the "
                 "operational low-altitude benchmark is CS-AWO-style, with "
-                "Gaussian/Von-Karman behaviour, L=183 m (600 ft), and "
-                "sigma=0.15U. The input therefore represents reference mean "
-                "wind U, not turbulence standard deviation. FAR/CS 25.341 "
-                "continuous turbulence is a separate transport-airplane "
-                "structural-load certification benchmark and is not used as the "
-                "routine 30-m urban-transition default."
+                "Gaussian/Von-Karman behaviour, L=183 m (600 ft), sigma=0.15U, "
+                "and a 0.005–0.5 Hz rigid-body synthesis band. The input is "
+                "reference mean wind U, not turbulence standard deviation. "
+                "FAR/CS 25.341 is a separate transport-airplane structural-load "
+                "benchmark and is not the routine 30-m urban-transition default."
             )
             break
 
