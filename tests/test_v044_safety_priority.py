@@ -25,8 +25,6 @@ def test_comfort_limited_forward_transition_keeps_tilt_airspeed_gated():
     state["v"] = np.array([2.0, 0.0, 0.0])
     state["tilt_angle"] = np.array(0.0)
 
-    # Even after the nominal 12-s transition clock has expired, low airspeed
-    # must prevent the nacelles from being forced to cruise orientation.
     tilt_cmd = controller._tilt_command(20.0, state)
     assert tilt_cmd < np.deg2rad(20.0)
 
@@ -55,6 +53,7 @@ def test_altitude_loss_overrides_comfort_and_reduces_cruise_tilt():
 
 def _run_until_prelanding(sim, mission, wind_model, max_time_s=150.0):
     min_operational_altitude = float("inf")
+    minimum_snapshot = None
     phases_seen = set()
     while sim.t < max_time_s:
         mission.update(sim.t, sim.state)
@@ -62,22 +61,35 @@ def _run_until_prelanding(sim, mission, wind_model, max_time_s=150.0):
         phases_seen.add(phase)
         if phase == FlightPhase.VERTICAL_LANDING:
             break
-        wind = wind_model.sample(sim.t, sim.state).vector_mps
-        sim.step(wind)
+        wind_sample = wind_model.sample(sim.t, sim.state)
+        sim.step(wind_sample.vector_mps)
         if phase in {
             FlightPhase.HOVER,
             FlightPhase.TRANSITION_TO_CRUISE,
             FlightPhase.CRUISE,
             FlightPhase.TRANSITION_TO_HOVER,
         }:
-            min_operational_altitude = min(
-                min_operational_altitude,
-                float(sim.state["x"][2]),
-            )
+            altitude = float(sim.state["x"][2])
+            if altitude < min_operational_altitude:
+                min_operational_altitude = altitude
+                minimum_snapshot = {
+                    "t": float(sim.t),
+                    "phase": phase.name,
+                    "altitude": altitude,
+                    "velocity": np.asarray(sim.state["v"]).round(3).tolist(),
+                    "tilt_deg": float(np.rad2deg(sim.state["tilt_angle"])),
+                    "body_rate_deg_s": float(
+                        np.linalg.norm(sim.state["w"]) * 180.0 / np.pi
+                    ),
+                    "wind": np.asarray(wind_sample.vector_mps).round(3).tolist(),
+                    "safety": float(getattr(
+                        sim.controller, "safety_override_factor", 0.0
+                    )),
+                }
         assert np.all(np.isfinite(sim.state["x"]))
         assert np.all(np.isfinite(sim.state["v"]))
         assert np.all(np.isfinite(sim.state["q"]))
-    return min_operational_altitude, phases_seen
+    return min_operational_altitude, phases_seen, minimum_snapshot
 
 
 def test_automatic_mission_survives_reported_10_mps_repeated_gust_case():
@@ -101,23 +113,20 @@ def test_automatic_mission_survives_reported_10_mps_repeated_gust_case():
         random_seed=7,
     ))
 
-    minimum, phases = _run_until_prelanding(
+    minimum, phases, snapshot = _run_until_prelanding(
         sim, mission, wind_model, max_time_s=150.0
     )
 
     assert FlightPhase.CRUISE in phases
     assert FlightPhase.TRANSITION_TO_HOVER in phases
     assert FlightPhase.HOVER in phases
-    # The reported trace reached the ground during a non-landing phase.  Keep a
-    # useful safety margin throughout takeoff-complete/forward/back transition.
-    assert minimum > 24.0
+    assert minimum > 24.0, f"minimum snapshot: {snapshot}"
 
 
 def test_comfort_guard_hover_to_cruise_does_not_trade_away_altitude():
     sim = _new_simulation()
     sim.controller.max_accel = 0.50
     sim.controller.max_command_jerk_mps3 = 1.50
-    # Match v0.4.2/v0.4.3 dashboard headroom when the guard is active.
     sim.controller.command_jerk_headroom = 0.20
     mission = AutomaticMission(
         sim.commander,
@@ -127,13 +136,13 @@ def test_comfort_guard_hover_to_cruise_does_not_trade_away_altitude():
     )
     calm = UrbanWindModel(WindScenarioConfig(enabled=False))
 
-    minimum, phases = _run_until_prelanding(
+    minimum, phases, snapshot = _run_until_prelanding(
         sim, mission, calm, max_time_s=100.0
     )
 
     assert FlightPhase.TRANSITION_TO_CRUISE in phases
     assert FlightPhase.CRUISE in phases
-    assert minimum > 27.0
+    assert minimum > 27.0, f"minimum snapshot: {snapshot}"
 
 
 def test_v044_dashboard_uses_wrap_safe_explanations_and_short_titles():
