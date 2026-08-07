@@ -89,7 +89,7 @@ class ComfortAwareController(TiltrotorController):
 
     def _desired_velocity_and_acceleration(self, t, state):
         v_ref, a_cmd = super()._desired_velocity_and_acceleration(t, state)
-        # v0.4.0 only applied max_accel inside forward-flight code.  Apply it
+        # v0.4.0 only applied max_accel inside forward-flight code. Apply it
         # here as a global guard so vertical takeoff/landing are covered too.
         a_cmd = clamp_norm(np.asarray(a_cmd, dtype=float), float(self.max_accel))
 
@@ -114,9 +114,9 @@ class ComfortAwareSimulation(TiltrotorSimulation):
     """Use kinematic acceleration/jerk after constraints are applied.
 
     The original diagnostics differentiated the unconstrained force-model
-    acceleration.  On the ground that value can contain -g even though the
-    ground constraint keeps velocity at zero.  Differentiating it at lift-off
-    creates an artificial jerk spike.  Here acceleration is calculated from
+    acceleration. On the ground that value can contain -g even though the
+    ground constraint keeps velocity at zero. Differentiating it at lift-off
+    creates an artificial jerk spike. Here acceleration is calculated from
     the actual integrated velocity change, so ground contact is respected.
     """
 
@@ -148,7 +148,9 @@ def _find_one(doc, model_type, title=None, label_prefix=None):
     for model in doc.select({"type": model_type}):
         if title is not None and getattr(model, "title", None) == title:
             return model
-        if label_prefix is not None and str(getattr(model, "label", "")).startswith(label_prefix):
+        if label_prefix is not None and str(
+            getattr(model, "label", "")
+        ).startswith(label_prefix):
             return model
     raise LookupError(f"Dashboard control not found: {title or label_prefix}")
 
@@ -219,7 +221,7 @@ def build_dashboard(doc, simulation=None):
 
     guard = _find_one(doc, Toggle, label_prefix="Comfort accel guard")
 
-    def apply_jerk_guard(*_):
+    def set_jerk_guard_value() -> None:
         if hasattr(sim.controller, "max_command_jerk_mps3"):
             sim.controller.max_command_jerk_mps3 = (
                 float(jerk_input.value or 1.50)
@@ -227,9 +229,13 @@ def build_dashboard(doc, simulation=None):
                 else None
             )
 
+    def apply_jerk_guard(attr, old, new) -> None:
+        del attr, old, new
+        set_jerk_guard_value()
+
     guard.on_change("active", apply_jerk_guard)
     jerk_input.on_change("value", apply_jerk_guard)
-    apply_jerk_guard()
+    set_jerk_guard_value()
 
     # Locate the primary stream after the base dashboard added all fields.
     stream_source = None
@@ -249,13 +255,16 @@ def build_dashboard(doc, simulation=None):
     )
     iso_plot.line(
         "time_s", "comfort_iso_weighted_rms_mps2",
-        source=stream_source, legend_label="Weighted RMS (Wd/Wk)",
+        source=stream_source,
+        legend_label="Weighted RMS (Wd/Wk)",
         line_width=2.4,
     )
     iso_plot.line(
         "time_s", "comfort_iso_limit_mps2",
-        source=stream_source, legend_label="0.315 m/s² target",
-        line_width=2.0, line_dash="dashed",
+        source=stream_source,
+        legend_label="0.315 m/s² target",
+        line_width=2.0,
+        line_dash="dashed",
     )
     iso_plot.legend.click_policy = "mute"
 
