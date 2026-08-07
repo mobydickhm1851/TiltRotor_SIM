@@ -56,8 +56,8 @@ def test_back_transition_uses_most_nominal_budget_for_braking():
     controller.commander.transition_to_hover(
         0.0,
         altitude_m=30.0,
-        hold_x_m=260.0,
-        hold_y_m=0.0,
+        x_m=260.0,
+        y_m=0.0,
         duration_s=24.0,
     )
     state = _safe_cruise_state(vehicle, speed=15.0)
@@ -90,8 +90,8 @@ def test_nominal_command_jerk_is_limited_as_3d_norm():
     controller.commander.transition_to_hover(
         0.05,
         altitude_m=30.0,
-        hold_x_m=260.0,
-        hold_y_m=0.0,
+        x_m=260.0,
+        y_m=0.0,
         duration_s=24.0,
     )
     controller.update(0.10, state)
